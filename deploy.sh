@@ -44,6 +44,63 @@ valid_port() {
     [[ "$p" =~ ^[0-9]+$ ]] && [[ "$p" -ge 1 ]] && [[ "$p" -le 65535 ]]
 }
 
+port_in_use() {
+    local p="$1"
+    if command -v ss >/dev/null 2>&1; then
+        ss -ltn 2>/dev/null | awk '{print $4}' | grep -Eq "(^|:)${p}$"
+    elif command -v netstat >/dev/null 2>&1; then
+        netstat -ltn 2>/dev/null | awk '{print $4}' | grep -Eq "(^|:)${p}$"
+    else
+        return 1
+    fi
+}
+
+find_free_port() {
+    local start="$1"
+    local p="$start"
+    while [[ "$p" -le 65535 ]]; do
+        if ! port_in_use "$p"; then
+            echo "$p"
+            return 0
+        fi
+        p=$((p + 1))
+    done
+    return 1
+}
+
+find_free_port_range() {
+    local start="$1"
+    local count="$2"
+    local p="$start"
+    local ok i
+    while [[ $((p + count - 1)) -le 65535 ]]; do
+        ok=1
+        for ((i=0; i<count; i++)); do
+            if port_in_use $((p + i)); then
+                ok=0
+                break
+            fi
+        done
+        if [[ "$ok" -eq 1 ]]; then
+            echo "${p}-$((p + count - 1))"
+            return 0
+        fi
+        p=$((p + 1))
+    done
+    return 1
+}
+
+resolve_oauth_ports() {
+    local gemini_start codex_start kiro_start
+    gemini_start="${GEMINI_PORT_RANGE%%-*}"
+    codex_start="$CODEX_PORT"
+    kiro_start="${KIRO_PORT_RANGE%%-*}"
+
+    GEMINI_PORT_RANGE="$(find_free_port_range "$gemini_start" 3)" || die "No free 3-port range found for Gemini/Antigravity OAuth"
+    CODEX_PORT="$(find_free_port "$codex_start")" || die "No free port found for Codex OAuth"
+    KIRO_PORT_RANGE="$(find_free_port_range "$kiro_start" 5)" || die "No free 5-port range found for Kiro OAuth"
+}
+
 docker_compose_cmd() {
     if command -v docker-compose >/dev/null 2>&1; then
         echo "docker-compose"
@@ -157,45 +214,19 @@ read_env_value() {
     grep -E "^${key}=" "$file" 2>/dev/null | tail -n 1 | cut -d= -f2- || true
 }
 
-prompt_secret() {
-    local label="$1"
-    local var_name="$2"
-    local current="${!var_name:-}"
-    local input=""
 
-    if [[ -n "$current" ]]; then
-        read -r -p "${label} 已从环境变量读取，是否覆盖？留空则继续使用当前值: " input
-        printf -v "$var_name" '%s' "${input:-$current}"
-        return
-    fi
-
-    read -r -p "${label} [可留空，稍后在 ${DEFAULT_INSTALL_PATH}/.env 填写]: " input
-    printf -v "$var_name" '%s' "$input"
-}
 
 create_env_file() {
     local workdir="$1"
     local host_port="$2"
 
-    local gemini_client_id="${GEMINI_OAUTH_CLIENT_ID:-}"
-    local gemini_client_secret="${GEMINI_OAUTH_CLIENT_SECRET:-}"
-    local antigravity_client_id="${ANTIGRAVITY_OAUTH_CLIENT_ID:-}"
-    local antigravity_client_secret="${ANTIGRAVITY_OAUTH_CLIENT_SECRET:-}"
-
-    echo ""
-    warn "Gemini/Antigravity OAuth 客户端配置不会写死在代码里，需要通过 .env 提供。"
-    prompt_secret "GEMINI_OAUTH_CLIENT_ID" gemini_client_id
-    prompt_secret "GEMINI_OAUTH_CLIENT_SECRET" gemini_client_secret
-    prompt_secret "ANTIGRAVITY_OAUTH_CLIENT_ID" antigravity_client_id
-    prompt_secret "ANTIGRAVITY_OAUTH_CLIENT_SECRET" antigravity_client_secret
-
     cat > "${workdir}/.env" <<EOF
 PORT=${host_port}
 TZ=Asia/Shanghai
-GEMINI_OAUTH_CLIENT_ID=${gemini_client_id}
-GEMINI_OAUTH_CLIENT_SECRET=${gemini_client_secret}
-ANTIGRAVITY_OAUTH_CLIENT_ID=${antigravity_client_id}
-ANTIGRAVITY_OAUTH_CLIENT_SECRET=${antigravity_client_secret}
+GEMINI_OAUTH_CLIENT_ID=${GEMINI_OAUTH_CLIENT_ID:-}
+GEMINI_OAUTH_CLIENT_SECRET=${GEMINI_OAUTH_CLIENT_SECRET:-}
+ANTIGRAVITY_OAUTH_CLIENT_ID=${ANTIGRAVITY_OAUTH_CLIENT_ID:-}
+ANTIGRAVITY_OAUTH_CLIENT_SECRET=${ANTIGRAVITY_OAUTH_CLIENT_SECRET:-}
 ARGS=
 EOF
 
@@ -356,6 +387,12 @@ deploy_aiclient2api() {
     read -r -p "Web/API public port [default: ${DEFAULT_WEB_PORT}]: " input_port
     local host_port="${input_port:-$DEFAULT_WEB_PORT}"
     valid_port "$host_port" || die "Invalid port, must be 1-65535"
+    if port_in_use "$host_port"; then
+        local old_port="$host_port"
+        host_port="$(find_free_port "$host_port")" || die "No free Web/API port found"
+        warn "Web/API port ${old_port} is in use, using ${host_port} instead."
+    fi
+    resolve_oauth_ports
 
     mkdir -p "${install_path}/configs" "${install_path}/backups"
     chmod 700 "${install_path}/configs"
@@ -502,6 +539,12 @@ restore_backup() {
 
     echo "$wd" > "$ENV_RECORD_FILE"
 
+    if [[ ! -f "${wd}/docker-compose.yml" || ! -f "${wd}/.env" ]]; then
+        if port_in_use "$DEFAULT_WEB_PORT"; then
+            DEFAULT_WEB_PORT="$(find_free_port "$DEFAULT_WEB_PORT")" || die "No free Web/API port found"
+        fi
+        resolve_oauth_ports
+    fi
     [[ -f "${wd}/docker-compose.yml" ]] || create_compose_file "$wd"
     [[ -f "${wd}/.env" ]] || create_env_file "$wd" "$DEFAULT_WEB_PORT"
     [[ -f "${wd}/configs/pwd" ]] || { generate_admin_password; write_pwd_file "$wd"; }
