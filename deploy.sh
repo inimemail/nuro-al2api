@@ -181,6 +181,8 @@ sync_project_source() {
 
     require_cmd git
     info "No local source found; cloning ${SOURCE_REPO_URL} (${SOURCE_REPO_BRANCH}) to ${dest} ..."
+    mkdir -p "$workdir"
+    cd "$workdir" || return 1
     rm -rf "$dest"
     git clone --depth 1 --branch "$SOURCE_REPO_BRANCH" "$SOURCE_REPO_URL" "$dest" || return 1
     cp "${BASH_SOURCE[0]}" "${workdir}/deploy.sh" 2>/dev/null || true
@@ -376,12 +378,17 @@ deploy_aiclient2api() {
     local install_path="${input_path:-$DEFAULT_INSTALL_PATH}"
 
     if [[ -d "$install_path" && "$(ls -A "$install_path" 2>/dev/null)" ]]; then
-        err "Install path already contains data: ${install_path}"
-        err "Choose another path, or run [8] uninstall first."
-        return
+        if [[ ! -f "${install_path}/docker-compose.yml" ]]; then
+            warn "Found incomplete deployment data at ${install_path}; reusing it."
+        else
+            err "Install path already contains data: ${install_path}"
+            err "Choose another path, or run [8] uninstall first."
+            return
+        fi
     fi
 
     mkdir -p "$install_path"
+    cd "$install_path" || return
     echo "$install_path" > "$ENV_RECORD_FILE"
 
     read -r -p "Web/API public port [default: ${DEFAULT_WEB_PORT}]: " input_port
@@ -398,8 +405,10 @@ deploy_aiclient2api() {
     chmod 700 "${install_path}/configs"
     chmod 755 "${install_path}/backups"
 
-    generate_admin_password
-    write_pwd_file "$install_path"
+    if [[ ! -f "${install_path}/configs/pwd" ]]; then
+        generate_admin_password
+        write_pwd_file "$install_path"
+    fi
     create_env_file "$install_path" "$host_port"
     create_default_config "$install_path"
     sync_project_source "$install_path" || die "Project source not found. Run this script from project root, or set PROJECT_ROOT=/path/to/project."
