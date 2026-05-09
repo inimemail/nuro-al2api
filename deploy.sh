@@ -7,7 +7,6 @@ export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:${PATH
 APP_NAME="AIClient2API"
 DEFAULT_INSTALL_PATH="/opt/aiclient2api"
 ENV_RECORD_FILE="/etc/aiclient2api_env"
-OAUTH_ENV_FILE="/etc/aiclient2api_oauth.env"
 
 CRON_TAG_BEGIN="# AICLIENT2API_BACKUP_BEGIN"
 CRON_TAG_END="# AICLIENT2API_BACKUP_END"
@@ -217,57 +216,19 @@ read_env_value() {
     grep -E "^${key}=" "$file" 2>/dev/null | tail -n 1 | cut -d= -f2- || true
 }
 
-load_oauth_env() {
-    local workdir="$1"
-    local local_oauth_file="${workdir}/oauth.env"
-
-    if [[ -f "$OAUTH_ENV_FILE" ]]; then
-        set -a
-        # shellcheck disable=SC1090
-        . "$OAUTH_ENV_FILE"
-        set +a
-    elif [[ -f "$local_oauth_file" ]]; then
-        set -a
-        # shellcheck disable=SC1090
-        . "$local_oauth_file"
-        set +a
-    fi
-}
-
-resolve_env_value() {
-    local workdir="$1"
-    local key="$2"
-    local current="${!key:-}"
-    local existing=""
-
-    if [[ -f "${workdir}/.env" ]]; then
-        existing="$(read_env_value "${workdir}/.env" "$key")"
-    fi
-
-    printf '%s' "${current:-$existing}"
-}
-
 
 
 create_env_file() {
     local workdir="$1"
     local host_port="$2"
-    local gemini_client_id gemini_client_secret antigravity_client_id antigravity_client_secret
-
-    load_oauth_env "$workdir"
-
-    gemini_client_id="$(resolve_env_value "$workdir" GEMINI_OAUTH_CLIENT_ID)"
-    gemini_client_secret="$(resolve_env_value "$workdir" GEMINI_OAUTH_CLIENT_SECRET)"
-    antigravity_client_id="$(resolve_env_value "$workdir" ANTIGRAVITY_OAUTH_CLIENT_ID)"
-    antigravity_client_secret="$(resolve_env_value "$workdir" ANTIGRAVITY_OAUTH_CLIENT_SECRET)"
 
     cat > "${workdir}/.env" <<EOF
 PORT=${host_port}
 TZ=Asia/Shanghai
-GEMINI_OAUTH_CLIENT_ID=${gemini_client_id}
-GEMINI_OAUTH_CLIENT_SECRET=${gemini_client_secret}
-ANTIGRAVITY_OAUTH_CLIENT_ID=${antigravity_client_id}
-ANTIGRAVITY_OAUTH_CLIENT_SECRET=${antigravity_client_secret}
+GEMINI_OAUTH_CLIENT_ID=${GEMINI_OAUTH_CLIENT_ID:-}
+GEMINI_OAUTH_CLIENT_SECRET=${GEMINI_OAUTH_CLIENT_SECRET:-}
+ANTIGRAVITY_OAUTH_CLIENT_ID=${ANTIGRAVITY_OAUTH_CLIENT_ID:-}
+ANTIGRAVITY_OAUTH_CLIENT_SECRET=${ANTIGRAVITY_OAUTH_CLIENT_SECRET:-}
 ARGS=
 EOF
 
@@ -375,7 +336,6 @@ show_access() {
     echo -e "密码文件: \033[33m${workdir}/configs/pwd\033[0m"
     echo -e "配置目录: \033[33m${workdir}/configs\033[0m"
     echo -e "环境文件: \033[33m${workdir}/.env\033[0m"
-    echo -e "OAuth 私有配置: \033[33m${OAUTH_ENV_FILE}\033[0m"
     echo "--------------------------------------------------"
     echo "端口映射:"
     echo "  Web/API: ${host_port} -> 3000"
