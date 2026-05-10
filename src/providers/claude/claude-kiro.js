@@ -416,6 +416,10 @@ function isWhitespaceOnly(text) {
     return String(text).trim().length === 0;
 }
 
+function generateFakeThinkingSignature() {
+    return crypto.randomBytes(64).toString('base64');
+}
+
 /**
  * Find a "real" thinking end tag that is not quoted/backticked and is followed by '\n\n'.
  * This avoids prematurely closing a thinking block when the model mentions `</thinking>`
@@ -2867,6 +2871,13 @@ async saveCredentialsToFile(filePath, newData) {
                                 streamState.stripThinkingLeadingNewline = false;
 
                                 events.push(...createThinkingDeltaEvents(""));
+                                if (streamState.thinkingBlockIndex != null) {
+                                    events.push({
+                                        type: "content_block_delta",
+                                        index: streamState.thinkingBlockIndex,
+                                        delta: { type: "signature_delta", signature: generateFakeThinkingSignature() }
+                                    });
+                                }
                                 events.push(...stopBlock(streamState.thinkingBlockIndex));
 
                                 // Strip '\n\n' after the end tag once we switch back to text (may arrive in next chunk).
@@ -3075,6 +3086,13 @@ async saveCredentialsToFile(filePath, newData) {
                     yield* pushEvents(createThinkingDeltaEvents(streamState.buffer));
                     streamState.buffer = '';
                     yield* pushEvents(createThinkingDeltaEvents(""));
+                    if (streamState.thinkingBlockIndex != null) {
+                        yield* pushEvents([{
+                            type: "content_block_delta",
+                            index: streamState.thinkingBlockIndex,
+                            delta: { type: "signature_delta", signature: generateFakeThinkingSignature() }
+                        }]);
+                    }
                     yield* pushEvents(stopBlock(streamState.thinkingBlockIndex));
                 } else if (!streamState.thinkingExtracted) {
                     const remaining = `${streamState.pendingTextBeforeThinking}${streamState.buffer}`;
@@ -3364,7 +3382,7 @@ async saveCredentialsToFile(filePath, newData) {
                         outputTokens += this.countTextTokens(block.text);
                         if (!isWhitespaceOnly(block.text)) hasTextContent = true;
                     } else if (block.type === 'thinking' && typeof block.thinking === 'string') {
-                        contentArray.push({ type: 'thinking', thinking: block.thinking });
+                        contentArray.push({ type: 'thinking', thinking: block.thinking, signature: generateFakeThinkingSignature() });
                         outputTokens += this.countTextTokens(block.thinking);
                         if (block.thinking) hasThinkingContent = true;
                     } else if (typeof block.text === 'string' && block.text) {
