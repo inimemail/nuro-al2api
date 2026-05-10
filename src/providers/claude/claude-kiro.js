@@ -40,7 +40,7 @@ const KIRO_CONSTANTS = {
     STREAM_TIMEOUT: 0, // Disable axios timeout for real streaming requests.
     TOKEN_REFRESH_TIMEOUT: 15000, // 15 seconds timeout for token refresh (shorter to avoid blocking)
     USER_AGENT: 'KiroIDE',
-    KIRO_VERSION: '0.11.63',
+    KIRO_VERSION: process.env.KIRO_VERSION || '1.0.6',
     CONTENT_TYPE_JSON: 'application/json',
     ACCEPT_JSON: 'application/json',
     AUTH_METHOD_SOCIAL: 'social',
@@ -158,6 +158,36 @@ function restoreKiroToolCallNames(toolCalls, toolNameMaps) {
             name: toolNameMaps.fromKiroName(toolCall.function?.name)
         }
     }));
+}
+
+/**
+ * Diagnose why a tool call's JSON input is invalid (borrowed from kiro-gateway).
+ * Returns a diagnostic string, or null if the JSON is valid or empty.
+ */
+function diagnoseJsonTruncation(raw) {
+    if (!raw || typeof raw !== 'string') return null;
+    const stripped = raw.trim();
+    if (!stripped) return null;
+    try { JSON.parse(stripped); return null; } catch (e) { /* proceed to diagnose */ }
+
+    const openBraces = (stripped.match(/{/g) || []).length;
+    const closeBraces = (stripped.match(/}/g) || []).length;
+    const openBrackets = (stripped.match(/\[/g) || []).length;
+    const closeBrackets = (stripped.match(/]/g) || []).length;
+
+    if (stripped.startsWith('{') && !stripped.endsWith('}')) {
+        return `missing ${openBraces - closeBraces} closing brace(s) (${stripped.length} bytes)`;
+    }
+    if (stripped.startsWith('[') && !stripped.endsWith(']')) {
+        return `missing ${openBrackets - closeBrackets} closing bracket(s) (${stripped.length} bytes)`;
+    }
+    if (openBraces !== closeBraces) {
+        return `unbalanced braces (${openBraces} open, ${closeBraces} close, ${stripped.length} bytes)`;
+    }
+    if (openBrackets !== closeBrackets) {
+        return `unbalanced brackets (${openBrackets} open, ${closeBrackets} close, ${stripped.length} bytes)`;
+    }
+    return `invalid JSON (${stripped.length} bytes)`;
 }
 
 function getKiroRequestMinIntervalMs(config) {
@@ -318,28 +348,42 @@ const KIRO_AUTH_TOKEN_FILE = "kiro-auth-token.json";
  * @returns {string} SHA256 格式的机器码
  */
 function generateMachineIdFromConfig(credentials) {
-    // 优先级：节点UUID > profileArn > clientId > fallback
+    // Combine credential identity with host-specific info to produce a unique
+    // per-credential-per-machine ID. This prevents multiple pool entries sharing
+    // the same clientId from producing identical machine fingerprints.
     const uniqueKey = credentials.uuid || credentials.profileArn || credentials.clientId || "KIRO_DEFAULT_MACHINE";
-    return crypto.createHash('sha256').update(uniqueKey).digest('hex');
+    const hostSalt = `${os.hostname()}-${os.userInfo().username}-${os.arch()}`;
+    return crypto.createHash('sha256').update(`${uniqueKey}:${hostSalt}`).digest('hex');
 }
 
 /**
- * 实时获取系统配置信息，用于生成 User-Agent
- * @returns {Object} 包含 osName, nodeVersion 等信息
+ * Generate system runtime info for User-Agent strings.
+ * Mimics a real Kiro IDE (Electron-based) rather than a raw Node.js process.
+ * @returns {Object} osName and electronVersion for UA construction
  */
 function getSystemRuntimeInfo() {
     const osPlatform = os.platform();
     const osRelease = os.release();
-    const nodeVersion = process.version.replace('v', '');
-    
+    // Kiro IDE runs on Electron — report Electron version, not Node.js
+    const electronVersion = process.env.KIRO_ELECTRON_VERSION || '33.4.0';
+
+    // Kiro IDE's Electron reports a simplified OS version.
+    // Real Electron os.release() on Windows gives major.minor.build but Kiro UA
+    // typically uses a shorter format.
     let osName = osPlatform;
-    if (osPlatform === 'win32') osName = `windows#${osRelease}`;
-    else if (osPlatform === 'darwin') osName = `macos#${osRelease}`;
-    else osName = `${osPlatform}#${osRelease}`;
+    if (osPlatform === 'win32') {
+        // Extract just major.minor (e.g., "10.0" from "10.0.26100")
+        const parts = osRelease.split('.');
+        osName = `windows#${parts[0]}.${parts[1] || '0'}.0`;
+    } else if (osPlatform === 'darwin') {
+        osName = `macos#${osRelease}`;
+    } else {
+        osName = `${osPlatform}#${osRelease}`;
+    }
 
     return {
         osName,
-        nodeVersion
+        nodeVersion: electronVersion  // Used as "md/electron#X.Y.Z" in UA
     };
 }
 
@@ -701,12 +745,12 @@ export class KiroApiService {
             headers: {
                 'Content-Type': KIRO_CONSTANTS.CONTENT_TYPE_JSON,
                 'Accept': KIRO_CONSTANTS.ACCEPT_JSON,
-                'amz-sdk-invocation-id': uuidv4(),
-                'amz-sdk-request': 'attempt=1; max=3',
+                // amz-sdk-invocation-id: generated fresh per-request in callApi/streamApiReal
+                // amz-sdk-request: generated per-request with correct attempt counter
                 'x-amzn-codewhisperer-optout': true,
-                'x-amzn-kiro-agent-mode': 'vibe',
+                // x-amzn-kiro-agent-mode: set per-request based on content (vibe/code)
                 'x-amz-user-agent': `aws-sdk-js/1.0.34 KiroIDE-${kiroVersion}-${machineId}`,
-                'user-agent': `aws-sdk-js/1.0.34 ua/2.1 os/${osName} lang/js md/nodejs#${nodeVersion} api/codewhispererstreaming#1.0.34 m/E KiroIDE-${kiroVersion}-${machineId}`,
+                'user-agent': `aws-sdk-js/1.0.34 ua/2.1 os/${osName} lang/js md/electron#${nodeVersion} api/codewhispererstreaming#1.0.34 m/E KiroIDE-${kiroVersion}-${machineId}`,
             },
         };
 
@@ -968,7 +1012,15 @@ async saveCredentialsToFile(filePath, newData) {
                 response = await this.axiosSocialRefreshInstance.request(axiosConfig);
                 logger.info('[Kiro Auth] Token refresh social response: ok');
             } else {
-                response = await this.axiosInstance.request(axiosConfig);
+                // Builder ID / IDC refresh must NOT use the main axiosInstance
+                // because it carries Kiro-specific headers (x-amzn-kiro-agent-mode,
+                // x-amzn-codewhisperer-optout, etc.) that shouldn't go to the OIDC
+                // endpoint and could be used for fingerprinting.
+                axiosConfig.headers = {
+                    'Content-Type': 'application/json',
+                    'User-Agent': 'KiroIDE',
+                };
+                response = await this.axiosSocialRefreshInstance.request(axiosConfig);
                 logger.info('[Kiro Auth] Token refresh idc response: ok');
             }
 
@@ -1515,7 +1567,7 @@ async saveCredentialsToFile(filePath, newData) {
                     logger.info('[Kiro] History does not end with assistantResponseMessage, adding empty one');
                     history.push({
                         assistantResponseMessage: {
-                            content: 'Continue'
+                            content: '(acknowledged)'
                         }
                     });
                 }
@@ -1787,9 +1839,12 @@ async saveCredentialsToFile(filePath, newData) {
 
         try {
             const token = this.accessToken; // Use the already initialized token
+            const hasTools = body.tools && body.tools.length > 0;
             const headers = {
                 'Authorization': `Bearer ${token}`,
                 'amz-sdk-invocation-id': `${uuidv4()}`,
+                'amz-sdk-request': `attempt=${retryCount + 1}; max=3`,
+                'x-amzn-kiro-agent-mode': hasTools ? 'code' : 'vibe',
             };
 
             // 当 model 以 kiro-amazonq 开头时，使用 amazonQUrl，否则使用 baseUrl
@@ -1852,10 +1907,18 @@ async saveCredentialsToFile(filePath, newData) {
                 throw error;
             }
             
-            // Handle 429 (Too Many Requests) - wait baseDelay then switch credential
+            // Handle 429 (Too Many Requests) - respect Retry-After header, then switch credential
             if (status === 429) {
-                logger.info(`[Kiro] Received 429 (Too Many Requests). Waiting ${baseDelay}ms before switching credential...`);
-                await new Promise(resolve => setTimeout(resolve, baseDelay));
+                const retryAfterHeader = error.response?.headers?.['retry-after'];
+                let waitMs = baseDelay;
+                if (retryAfterHeader) {
+                    const retryAfterSec = Number(retryAfterHeader);
+                    if (Number.isFinite(retryAfterSec) && retryAfterSec > 0) {
+                        waitMs = Math.min(retryAfterSec * 1000, 60000); // Cap at 60s
+                    }
+                }
+                logger.info(`[Kiro] Received 429 (Too Many Requests). Retry-After: ${retryAfterHeader || 'none'}. Waiting ${waitMs}ms before switching credential...`);
+                await new Promise(resolve => setTimeout(resolve, waitMs));
                 // Mark error for credential switch without recording error count
                 error.shouldSwitchCredential = true;
                 error.skipErrorCount = true;
@@ -2366,9 +2429,12 @@ async saveCredentialsToFile(filePath, newData) {
         const toolNameMaps = requestData._kiroToolNameMaps;
 
         const token = this.accessToken;
+        const hasTools = body.tools && body.tools.length > 0;
         const headers = {
             'Authorization': `Bearer ${token}`,
             'amz-sdk-invocation-id': `${uuidv4()}`,
+            'amz-sdk-request': 'attempt=1; max=3',
+            'x-amzn-kiro-agent-mode': hasTools ? 'code' : 'vibe',
         };
 
         const requestUrl = model.startsWith('amazonq') ? this.amazonQUrl : this.baseUrl;
@@ -2408,6 +2474,8 @@ async saveCredentialsToFile(filePath, newData) {
                 // 只跳过连续重复超过 2 次的相同内容，避免误杀合法重复
                 for (const event of events) {
                     if (event.type === 'content' && event.data) {
+                        // NOTE: followupPrompt events are already filtered in parseAwsEventStreamBuffer
+                        // (line ~2289: !parsed.followupPrompt). No additional check needed here.
                         // 检查是否与上一个 content 事件完全相同
                         if (lastContentEvent === event.data) {
                             lastContentRepeatCount++;
@@ -2481,10 +2549,18 @@ async saveCredentialsToFile(filePath, newData) {
                 throw error;
             }
             
-            // Handle 429 (Too Many Requests) - wait baseDelay then switch credential
+            // Handle 429 (Too Many Requests) - respect Retry-After, then switch credential
             if (status === 429) {
-                logger.info(`[Kiro] Received 429 (Too Many Requests) in stream. Waiting ${baseDelay}ms before switching credential...`);
-                await new Promise(resolve => setTimeout(resolve, baseDelay));
+                const retryAfterHeader = error.response?.headers?.['retry-after'];
+                let waitMs = baseDelay;
+                if (retryAfterHeader) {
+                    const retryAfterSec = Number(retryAfterHeader);
+                    if (Number.isFinite(retryAfterSec) && retryAfterSec > 0) {
+                        waitMs = Math.min(retryAfterSec * 1000, 60000);
+                    }
+                }
+                logger.info(`[Kiro] Received 429 (Too Many Requests) in stream. Retry-After: ${retryAfterHeader || 'none'}. Waiting ${waitMs}ms before switching credential...`);
+                await new Promise(resolve => setTimeout(resolve, waitMs));
                 // Mark error for credential switch without recording error count
                 error.shouldSwitchCredential = true;
                 error.skipErrorCount = true;
@@ -2845,7 +2921,8 @@ async saveCredentialsToFile(filePath, newData) {
                                 try {
                                     parsedInput = JSON.parse(currentToolCall.input);
                                 } catch (e) {
-                                    // input 不是有效 JSON，保持原样
+                                    const diag = diagnoseJsonTruncation(currentToolCall.input);
+                                    if (diag) logger.warn(`[Kiro Stream] Tool '${currentToolCall.name}' truncated input: ${diag}`);
                                 }
                                 toolCalls.push({
                                     toolUseId: currentToolCall.toolUseId,
@@ -2900,7 +2977,8 @@ async saveCredentialsToFile(filePath, newData) {
                             try {
                                 parsedInput = JSON.parse(currentToolCall.input);
                             } catch (e) {
-                                // input 不是有效 JSON，保持原样
+                                const diag = diagnoseJsonTruncation(currentToolCall.input);
+                                if (diag) logger.warn(`[Kiro Stream] Tool '${currentToolCall.name}' truncated input: ${diag}`);
                             }
                             toolCalls.push({
                                 toolUseId: currentToolCall.toolUseId,
@@ -3468,7 +3546,7 @@ async saveCredentialsToFile(filePath, newData) {
         const headers = {
             'Authorization': `Bearer ${this.accessToken}`,
             'x-amz-user-agent': `aws-sdk-js/1.0.34 KiroIDE-${kiroVersion}-${machineId}`,
-            'user-agent': `aws-sdk-js/1.0.34 ua/2.1 os/${osName} lang/js md/nodejs#${nodeVersion} api/codewhispererstreaming#1.0.34 m/E KiroIDE-${kiroVersion}-${machineId}`,
+            'user-agent': `aws-sdk-js/1.0.34 ua/2.1 os/${osName} lang/js md/electron#${nodeVersion} api/codewhispererstreaming#1.0.34 m/E KiroIDE-${kiroVersion}-${machineId}`,
             'amz-sdk-invocation-id': uuidv4(),
             'amz-sdk-request': 'attempt=1; max=1',
         };

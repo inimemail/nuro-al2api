@@ -592,7 +592,7 @@ function createKiroHttpCallbackServer(port, codeVerifier, expectedState, options
                         method: 'POST',
                         headers: {
                             'Content-Type': 'application/json',
-                            'User-Agent': 'AIClient2API/1.0.0'
+                            'User-Agent': 'KiroIDE'
                         },
                         body: JSON.stringify({
                             code,
