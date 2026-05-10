@@ -216,6 +216,21 @@ read_env_value() {
     grep -E "^${key}=" "$file" 2>/dev/null | tail -n 1 | cut -d= -f2- || true
 }
 
+load_existing_oauth_ports() {
+    local workdir="$1"
+    local compose_file="${workdir}/docker-compose.yml"
+    [[ -f "$compose_file" ]] || return 0
+
+    local gemini codex kiro
+    gemini="$(grep -E '^[[:space:]]*-[[:space:]]*"[0-9]+-[0-9]+:8085-8087"' "$compose_file" | head -n 1 | sed -E 's/.*"([0-9]+-[0-9]+):8085-8087".*/\1/' || true)"
+    codex="$(grep -E '^[[:space:]]*-[[:space:]]*"[0-9]+:1455"' "$compose_file" | head -n 1 | sed -E 's/.*"([0-9]+):1455".*/\1/' || true)"
+    kiro="$(grep -E '^[[:space:]]*-[[:space:]]*"[0-9]+-[0-9]+:19876-19880"' "$compose_file" | head -n 1 | sed -E 's/.*"([0-9]+-[0-9]+):19876-19880".*/\1/' || true)"
+
+    [[ -n "$gemini" ]] && GEMINI_PORT_RANGE="$gemini"
+    [[ -n "$codex" ]] && CODEX_PORT="$codex"
+    [[ -n "$kiro" ]] && KIRO_PORT_RANGE="$kiro"
+}
+
 
 
 create_env_file() {
@@ -255,6 +270,8 @@ create_default_config() {
   "REQUEST_MAX_RETRIES": 3,
   "REQUEST_BASE_DELAY": 1000,
   "CREDENTIAL_SWITCH_MAX_RETRIES": 5,
+  "STREAM_HEARTBEAT_INTERVAL_MS": 15000,
+  "KIRO_STREAM_TIMEOUT_MS": 0,
   "RATE_LIMIT_COOLDOWN_ENABLED": false,
   "RATE_LIMIT_COOLDOWN_MS": 30000,
   "RATE_LIMIT_COOLDOWN_JITTER_MS": 5000,
@@ -433,12 +450,19 @@ upgrade_service() {
     local dc_cmd
     dc_cmd="$(docker_compose_cmd)"
 
+    load_existing_oauth_ports "$workdir"
     sync_project_source "$workdir" || die "Project source not found. Run this script from project root, or set PROJECT_ROOT=/path/to/project."
     create_compose_file "$workdir"
 
     info "Rebuilding container from current source ..."
     $dc_cmd build || die "Local image build failed"
-    $dc_cmd up -d || die "Service start failed"
+    $dc_cmd down 2>/dev/null || true
+    if ! $dc_cmd up -d; then
+        warn "Service start failed. Re-checking OAuth ports and retrying once..."
+        resolve_oauth_ports
+        create_compose_file "$workdir"
+        $dc_cmd up -d || die "Service start failed"
+    fi
 
     wait_app_ready || true
     show_access "$workdir"
@@ -553,6 +577,8 @@ restore_backup() {
             DEFAULT_WEB_PORT="$(find_free_port "$DEFAULT_WEB_PORT")" || die "No free Web/API port found"
         fi
         resolve_oauth_ports
+    else
+        load_existing_oauth_ports "$wd"
     fi
     [[ -f "${wd}/docker-compose.yml" ]] || create_compose_file "$wd"
     [[ -f "${wd}/.env" ]] || create_env_file "$wd" "$DEFAULT_WEB_PORT"

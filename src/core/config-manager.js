@@ -83,6 +83,8 @@ export async function initializeConfig(args = process.argv.slice(2), configFileP
         REQUEST_MAX_RETRIES: 3,
         REQUEST_BASE_DELAY: 1000,
         CREDENTIAL_SWITCH_MAX_RETRIES: 5, // 坏凭证切换最大重试次数（用于认证错误后切换凭证）
+        STREAM_HEARTBEAT_INTERVAL_MS: 15000,
+        KIRO_STREAM_TIMEOUT_MS: 0,
         RATE_LIMIT_COOLDOWN_ENABLED: false, // 429 限流后是否短暂冷却账号
         RATE_LIMIT_COOLDOWN_MS: 30000, // 429 限流默认冷却时间（毫秒）
         RATE_LIMIT_COOLDOWN_JITTER_MS: 5000, // 429 限流冷却随机抖动（毫秒）
@@ -147,6 +149,8 @@ export async function initializeConfig(args = process.argv.slice(2), configFileP
         { flag: '--host',                 configKey: 'HOST',                   type: 'string' },
         { flag: '--prompt-log-base-name', configKey: 'PROMPT_LOG_BASE_NAME',   type: 'string' },
         { flag: '--request-max-retries',  configKey: 'REQUEST_MAX_RETRIES',    type: 'int' },
+        { flag: '--stream-heartbeat-interval-ms', configKey: 'STREAM_HEARTBEAT_INTERVAL_MS', type: 'int' },
+        { flag: '--kiro-stream-timeout-ms', configKey: 'KIRO_STREAM_TIMEOUT_MS', type: 'int' },
         { flag: '--rate-limit-cooldown-enabled', configKey: 'RATE_LIMIT_COOLDOWN_ENABLED', type: 'bool' },
         { flag: '--rate-limit-cooldown-ms', configKey: 'RATE_LIMIT_COOLDOWN_MS', type: 'int' },
         { flag: '--rate-limit-cooldown-jitter-ms', configKey: 'RATE_LIMIT_COOLDOWN_JITTER_MS', type: 'int' },
