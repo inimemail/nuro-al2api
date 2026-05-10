@@ -2249,6 +2249,51 @@ async saveCredentialsToFile(filePath, newData) {
         return { responseText: fullResponseText, toolCalls: uniqueToolCalls };
     }
 
+    /**
+     * Normalize incoming requestBody before sending to Kiro:
+     * 1. Map output_config.format -> response_format
+     * 2. Strip output_config.effort (unsupported, causes errors)
+     * 3. Strip thinking.display (unsupported field)
+     * 4. Filter "You are Claude Code..." system prompt entries that trigger safety refusals
+     */
+    _normalizeRequestBody(requestBody) {
+        // output_config handling
+        if (requestBody.output_config) {
+            const oc = requestBody.output_config;
+            // Map format to response_format if not already set
+            if (oc.format && !requestBody.response_format) {
+                requestBody.response_format = oc.format;
+            }
+            // Drop output_config entirely — Kiro doesn't understand it
+            delete requestBody.output_config;
+        }
+
+        // thinking.display is not a standard field — remove it to avoid errors
+        if (requestBody.thinking && requestBody.thinking.display !== undefined) {
+            delete requestBody.thinking.display;
+        }
+
+        // Filter system prompt entries that contain Claude Code identity strings
+        // which cause Kiro to trigger "I can't discuss that." safety refusals
+        if (Array.isArray(requestBody.system)) {
+            requestBody.system = requestBody.system.filter(entry => {
+                const text = typeof entry === 'string' ? entry : entry?.text || '';
+                return !text.includes("You are Claude Code") &&
+                       !text.includes("Anthropic's official CLI");
+            });
+            if (requestBody.system.length === 0) {
+                delete requestBody.system;
+            }
+        } else if (typeof requestBody.system === 'string') {
+            if (requestBody.system.includes("You are Claude Code") ||
+                requestBody.system.includes("Anthropic's official CLI")) {
+                delete requestBody.system;
+            }
+        }
+
+        return requestBody;
+    }
+
     async generateContent(model, requestBody) {
         if (!this.isInitialized) await this.initialize();
 
@@ -2260,7 +2305,9 @@ async saveCredentialsToFile(filePath, newData) {
         if (requestBody._requestBaseUrl) {
             delete requestBody._requestBaseUrl;
         }
-        
+
+        this._normalizeRequestBody(requestBody);
+
         // 检查 token 是否即将过期，如果是则推送到刷新队列
         if (this.isExpiryDateNear()) {
             logger.info('[Kiro] Token is near expiry, marking credential as need refresh...');
@@ -2683,7 +2730,9 @@ async saveCredentialsToFile(filePath, newData) {
         if (requestBody._requestBaseUrl) {
             delete requestBody._requestBaseUrl;
         }
-        
+
+        this._normalizeRequestBody(requestBody);
+
         // 检查 token 是否即将过期，如果是则推送到刷新队列
         if (this.isExpiryDateNear()) {
             logger.info('[Kiro] Token is near expiry, marking credential as need refresh...');
