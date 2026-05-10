@@ -1026,10 +1026,14 @@ async saveCredentialsToFile(filePath, newData) {
         }
 
         if (type === 'adaptive') {
+            // CodeWhisperer may not support adaptive thinking mode natively.
+            // Convert to 'enabled' with a budget derived from effort level to ensure compatibility.
             const effortRaw = typeof thinking.effort === 'string' ? thinking.effort : '';
             const effort = effortRaw.toLowerCase().trim();
-            const normalizedEffort = (effort === 'low' || effort === 'medium' || effort === 'high') ? effort : 'high';
-            return `<thinking_mode>adaptive</thinking_mode><thinking_effort>${normalizedEffort}</thinking_effort>`;
+            const effortBudgetMap = { 'low': 4096, 'medium': 12288, 'high': KIRO_THINKING.MAX_BUDGET_TOKENS };
+            const budget = effortBudgetMap[effort] || KIRO_THINKING.MAX_BUDGET_TOKENS;
+            logger.info(`[Kiro] Converting adaptive thinking (effort=${effort || 'default'}) to enabled mode with budget=${budget}`);
+            return `<thinking_mode>enabled</thinking_mode><max_thinking_length>${budget}</max_thinking_length>`;
         }
 
         return null;
@@ -1038,6 +1042,27 @@ async saveCredentialsToFile(filePath, newData) {
     _hasThinkingPrefix(text) {
         if (!text) return false;
         return text.includes(KIRO_THINKING.MODE_TAG) || text.includes(KIRO_THINKING.MAX_LEN_TAG) || text.includes(KIRO_THINKING.EFFORT_TAG);
+    }
+
+    /**
+     * Determine whether the current message should be wrapped with a code-context hint
+     * to help bypass AWS CodeWhisperer's intent classifier that silently filters non-code queries.
+     * @param {string} content - The current message content
+     * @param {Array} toolResults - Current tool results
+     * @param {Object} toolsContext - Tools context object
+     * @returns {boolean} True if the message should be wrapped
+     */
+    _shouldApplyCodeContextWrapper(content, toolResults, toolsContext) {
+        if (!content || typeof content !== 'string') return false;
+        // Don't wrap if tools are present (it's already a coding context)
+        if (toolResults && toolResults.length > 0) return false;
+        if (toolsContext && toolsContext.tools && toolsContext.tools.length > 0) return false;
+        // Don't wrap if content is long enough (likely already has sufficient context)
+        if (content.length > 500) return false;
+        // Don't wrap if content already has code-like patterns
+        const codePatterns = /(`{1,3}|function\s|class\s|import\s|require\(|def\s|const\s|let\s|var\s|public\s|private\s|\.py|\.js|\.ts|\.java|\.cpp|\.go|\.rs|<\/?[a-z]+>|\{[\s\S]*\})/i;
+        if (codePatterns.test(content)) return false;
+        return true;
     }
 
     _toClaudeContentBlocksFromKiroText(content) {
@@ -1407,6 +1432,12 @@ async saveCredentialsToFile(filePath, newData) {
                 currentContent = currentContent
                     ? `${systemPrompt}\n\n${currentContent}`
                     : systemPrompt;
+            }
+
+            // Apply code-context wrapper for non-code requests to bypass AWS intent classifier
+            if (this._shouldApplyCodeContextWrapper(currentContent, currentToolResults, toolsContext)) {
+                logger.info('[Kiro] Applying code-context wrapper to non-code request');
+                currentContent = `[Code Assistant Context]\n${currentContent}`;
             }
         }
 
@@ -1983,25 +2014,49 @@ async saveCredentialsToFile(filePath, newData) {
         
         const finalModel = resolveKiroModel(model);
         logger.info(`[Kiro] Calling generateContent with model: ${finalModel}`);
-        
+
         // Estimate input tokens before making the API call
         const inputTokens = this.estimateInputTokens(requestBody);
-        
-        const response = await this.callApi('', model, requestBody);
 
-        try {
-            const { responseText, toolCalls } = this._processApiResponse(response);
-            const thinkingType = requestBody?.thinking?.type;
-            const thinkingRequested = typeof thinkingType === 'string' &&
-                (thinkingType.toLowerCase() === 'enabled' || thinkingType.toLowerCase() === 'adaptive');
-            const contentForClaude = thinkingRequested
-                ? this._toClaudeContentBlocksFromKiroText(responseText)
-                : responseText;
-            return this.buildClaudeResponse(contentForClaude, false, 'assistant', model, toolCalls, inputTokens);
-        } catch (error) {
-            logger.error('[Kiro] Error in generateContent:', error);
-            throw error;
+        const maxEmptyRetries = Number(this.config.KIRO_EMPTY_RESPONSE_MAX_RETRIES) || 2;
+        let emptyRetryCount = 0;
+        let responseText, toolCalls;
+
+        // Retry loop for empty responses
+        while (true) {
+            const response = await this.callApi('', model, requestBody);
+
+            try {
+                const result = this._processApiResponse(response);
+                responseText = result.responseText;
+                toolCalls = result.toolCalls;
+
+                // Check for completely empty response
+                if (responseText.trim() === '' && toolCalls.length === 0 && emptyRetryCount < maxEmptyRetries) {
+                    emptyRetryCount++;
+                    logger.warn(`[Kiro] Empty response detected (0 output tokens). Retrying... (attempt ${emptyRetryCount}/${maxEmptyRetries})`);
+                    continue;
+                }
+                break;
+            } catch (error) {
+                logger.error('[Kiro] Error in generateContent:', error);
+                throw error;
+            }
         }
+
+        // If still empty after all retries, inject a fallback message
+        if (responseText.trim() === '' && toolCalls.length === 0) {
+            logger.error(`[Kiro] Empty response persisted after ${maxEmptyRetries} retries. Injecting fallback message.`);
+            responseText = '[The model returned an empty response after multiple retries. This may be caused by content filtering from the upstream provider. Please try rephrasing your request with a code-related context.]';
+        }
+
+        const thinkingType = requestBody?.thinking?.type;
+        const thinkingRequested = typeof thinkingType === 'string' &&
+            (thinkingType.toLowerCase() === 'enabled' || thinkingType.toLowerCase() === 'adaptive');
+        const contentForClaude = thinkingRequested
+            ? this._toClaudeContentBlocksFromKiroText(responseText)
+            : responseText;
+        return this.buildClaudeResponse(contentForClaude, false, 'assistant', model, toolCalls, inputTokens);
     }
 
     /**
@@ -2445,13 +2500,15 @@ async saveCredentialsToFile(filePath, newData) {
         try {
             let totalContent = '';
             let outputTokens = 0;
-            const toolCalls = [];
+            let toolCalls = [];
             let currentToolCall = null; // 用于累积结构化工具调用
-            const toolUseBlockIndexes = new Map(); // toolUseId -> content block index
+            let toolUseBlockIndexes = new Map(); // toolUseId -> content block index
 
             const estimatedInputTokens = this.estimateInputTokens(requestBody);
+            const maxEmptyRetries = Number(this.config.KIRO_EMPTY_RESPONSE_MAX_RETRIES) || 2;
+            let emptyRetryCount = 0;
 
-            // 1. 先发送 message_start 事件
+            // 1. 先发送 message_start 事件 (only once, outside retry loop)
             yield {
                 type: "message_start",
                 message: {
@@ -2468,6 +2525,31 @@ async saveCredentialsToFile(filePath, newData) {
                     content: []
                 }
             };
+
+            // Retry loop for empty responses
+            retryLoop: while (true) {
+                // Reset state for retry
+                if (emptyRetryCount > 0) {
+                    totalContent = '';
+                    outputTokens = 0;
+                    toolCalls = [];
+                    currentToolCall = null;
+                    toolUseBlockIndexes = new Map();
+                    contextUsagePercentage = null;
+                    // Reset stream state
+                    streamState.buffer = '';
+                    streamState.pendingTextBeforeThinking = '';
+                    streamState.inThinking = false;
+                    streamState.thinkingExtracted = false;
+                    streamState.thinkingBlockIndex = null;
+                    streamState.textBlockIndex = null;
+                    streamState.nextBlockIndex = 0;
+                    streamState.stoppedBlocks = new Set();
+                    streamState.stripThinkingLeadingNewline = false;
+                    streamState.stripTextLeadingNewlinesAfterThinking = false;
+                    streamState.hasVisibleText = false;
+                    streamState.hasThinkingContent = false;
+                }
 
             // 2. 流式接收并发送每个 content_block_delta
             for await (const event of this.streamApiReal('', model, requestBody)) {
@@ -2785,6 +2867,35 @@ async saveCredentialsToFile(filePath, newData) {
                 // 处理非思考模式下剩余的缓冲区数据
                 yield* pushEvents(createTextDeltaEvents(streamState.buffer));
                 streamState.buffer = '';
+            }
+
+            // --- Empty response detection and retry ---
+            const isCompletelyEmpty = !streamState.hasVisibleText &&
+                !streamState.hasThinkingContent &&
+                toolCalls.length === 0 &&
+                totalContent.trim() === '';
+
+            if (isCompletelyEmpty && emptyRetryCount < maxEmptyRetries) {
+                emptyRetryCount++;
+                logger.warn(`[Kiro Stream] Empty response detected (0 output tokens, end_turn). Retrying... (attempt ${emptyRetryCount}/${maxEmptyRetries})`);
+                continue retryLoop;
+            }
+
+            // --- End of retry loop ---
+            break;
+            } // end retryLoop
+
+            // If still completely empty after all retries, inject a fallback message
+            const isStillEmpty = !streamState.hasVisibleText &&
+                !streamState.hasThinkingContent &&
+                toolCalls.length === 0 &&
+                totalContent.trim() === '';
+
+            if (isStillEmpty) {
+                logger.error(`[Kiro Stream] Empty response persisted after ${maxEmptyRetries} retries. Injecting fallback message.`);
+                yield* pushEvents(createTextDeltaEvents(
+                    '[The model returned an empty response after multiple retries. This may be caused by content filtering from the upstream provider. Please try rephrasing your request with a code-related context.]'
+                ));
             }
 
             const emittedOnlyThinking = thinkingRequested &&
