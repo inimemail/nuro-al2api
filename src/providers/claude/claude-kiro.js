@@ -1575,13 +1575,13 @@ async saveCredentialsToFile(filePath, newData) {
             if (history.length > 0) {
                 const lastHistoryItem = history[history.length - 1];
                 if (!lastHistoryItem.assistantResponseMessage) {
-                    // 补一个最小占位。不要用 "(acknowledged)" 这类自然语言——
-                    // 模型会把它当成自己过去的回复风格延续下去，污染输出结构和语气。
-                    // 用单个空格：既满足 API 对非空字符串的要求，又几乎不影响上下文。
+                    // 补一个最小占位。用单个点号（.）而不是 "(acknowledged)" 这类描述性文本——
+                    // 模型会把 "(acknowledged)" 当成自己过去的回复风格并延续。
+                    // 单点号满足 API 非空校验，且不会被模型当作有意义的回复。
                     logger.info('[Kiro] History does not end with assistantResponseMessage, adding minimal placeholder');
                     history.push({
                         assistantResponseMessage: {
-                            content: ' '
+                            content: '.'
                         }
                     });
                 }
@@ -1658,13 +1658,11 @@ async saveCredentialsToFile(filePath, newData) {
             // AWS intent classification but the leak is worse than the occasional block.
         }
 
-        // agentTaskType 必须与请求 header `x-amzn-kiro-agent-mode` 一致：
-        // 有 tools 时走 code（代理/工具路径），否则走 vibe（纯问答）。
-        // 不一致会让 Kiro 侧对纯问答注入代码上下文偏置，表现为知识答偏、幻觉增多。
-        const hasToolsForTaskType = Array.isArray(tools) && tools.length > 0;
+        // agentTaskType 在请求 body 里只能是 "vibe"（API 不接受 "code"），
+        // code/vibe 的区分由请求 header `x-amzn-kiro-agent-mode` 控制。
         const request = {
             conversationState: {
-                agentTaskType: hasToolsForTaskType ? "code" : "vibe",
+                agentTaskType: "vibe",
                 chatTriggerType: KIRO_CONSTANTS.CHAT_TRIGGER_TYPE_MANUAL,
                 conversationId: conversationId,
                 currentMessage: {} // Will be populated as userInputMessage
