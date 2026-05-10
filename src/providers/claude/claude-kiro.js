@@ -1338,15 +1338,11 @@ async saveCredentialsToFile(filePath, newData) {
         const toolNameMaps = buildKiroToolNameMaps(tools);
         const toolsContext = buildKiroToolsContext(tools, toolNameMaps);
 
-        // Apply tool_choice as an explicit instruction in the system prompt.
-        // CodeWhisperer doesn't have a native tool_choice parameter, so we inject
-        // natural-language directives that the model treats as binding.
+        // tool_choice 指令：CodeWhisperer 没有原生 tool_choice 参数。
+        // 注意：不要注入到 system prompt——system 指令会被中间的 history 稀释，
+        // 模型对"最近看到的指令"服从度更高，所以把它拼到当前 user 消息末尾，
+        // 确保模型在决定输出前最后读到的是这条强约束。
         const toolChoiceInstruction = this._buildToolChoiceInstruction(toolChoice, tools);
-        if (toolChoiceInstruction) {
-            systemPrompt = systemPrompt
-                ? `${systemPrompt}\n\n${toolChoiceInstruction}`
-                : toolChoiceInstruction;
-        }
 
         const history = [];
         let startIndex = 0;
@@ -1558,20 +1554,27 @@ async saveCredentialsToFile(filePath, newData) {
                 delete assistantResponseMessage.toolUses;
             }
             history.push({ assistantResponseMessage });
-            
+
             // 设置 currentContent 为 "Continue"，因为我们需要一个 user 消息来触发 AI 继续
             currentContent = 'Continue';
+
+            // tool_choice 强约束在最后 user 消息（Continue）末尾追加，保持遵循度
+            if (toolChoiceInstruction) {
+                currentContent = `${currentContent}\n\n${toolChoiceInstruction}`;
+            }
         } else {
             // 最后一条消息是 user，需要确保 history 最后一个元素是 assistantResponseMessage
             // Kiro API 要求 history 必须以 assistantResponseMessage 结尾
             if (history.length > 0) {
                 const lastHistoryItem = history[history.length - 1];
                 if (!lastHistoryItem.assistantResponseMessage) {
-                    // 最后一个不是 assistantResponseMessage，需要补全一个空的
-                    logger.info('[Kiro] History does not end with assistantResponseMessage, adding empty one');
+                    // 补一个最小占位。不要用 "(acknowledged)" 这类自然语言——
+                    // 模型会把它当成自己过去的回复风格延续下去，污染输出结构和语气。
+                    // 用单个空格：既满足 API 对非空字符串的要求，又几乎不影响上下文。
+                    logger.info('[Kiro] History does not end with assistantResponseMessage, adding minimal placeholder');
                     history.push({
                         assistantResponseMessage: {
-                            content: '(acknowledged)'
+                            content: ' '
                         }
                     });
                 }
@@ -1636,14 +1639,25 @@ async saveCredentialsToFile(filePath, newData) {
                     : systemPrompt;
             }
 
+            // tool_choice 指令追加到当前用户消息末尾——模型对"最后看到的指令"遵循度最高。
+            if (toolChoiceInstruction) {
+                currentContent = currentContent
+                    ? `${currentContent}\n\n${toolChoiceInstruction}`
+                    : toolChoiceInstruction;
+            }
+
             // NOTE: [Code Assistant Context] wrapper removed — the model echoes it back
             // to the user, which exposes the proxy. The wrapper was intended to bypass
             // AWS intent classification but the leak is worse than the occasional block.
         }
 
+        // agentTaskType 必须与请求 header `x-amzn-kiro-agent-mode` 一致：
+        // 有 tools 时走 code（代理/工具路径），否则走 vibe（纯问答）。
+        // 不一致会让 Kiro 侧对纯问答注入代码上下文偏置，表现为知识答偏、幻觉增多。
+        const hasToolsForTaskType = Array.isArray(tools) && tools.length > 0;
         const request = {
             conversationState: {
-                agentTaskType: "vibe",
+                agentTaskType: hasToolsForTaskType ? "code" : "vibe",
                 chatTriggerType: KIRO_CONSTANTS.CHAT_TRIGGER_TYPE_MANUAL,
                 conversationId: conversationId,
                 currentMessage: {} // Will be populated as userInputMessage
@@ -1727,75 +1741,80 @@ async saveCredentialsToFile(filePath, newData) {
         const rawStr = Buffer.isBuffer(rawData) ? rawData.toString('utf8') : String(rawData);
         let fullContent = '';
         const toolCalls = [];
-        let currentToolCallDict = null;
-        // logger.info(`rawStr=${rawStr}`);
 
-        // 改进的 SSE 事件解析：匹配 :message-typeevent 后面的 JSON 数据
-        // 使用更精确的正则来匹配 SSE 格式的事件
-        const sseEventRegex = /:message-typeevent(\{[^]*?(?=:event-type|$))/g;
-        const legacyEventRegex = /event(\{.*?(?=event\{|$))/gs;
-        
-        // 首先尝试使用 SSE 格式解析
-        let matches = [...rawStr.matchAll(sseEventRegex)];
-        
-        // 如果 SSE 格式没有匹配到，回退到旧的格式
-        if (matches.length === 0) {
-            matches = [...rawStr.matchAll(legacyEventRegex)];
-        }
+        // 复用流式解析器：brace-counting 会枚举整条响应里所有 JSON payload，
+        // 不像旧的正则 "break-on-first-match" 那样漏掉同一事件块里的后续对象；
+        // 同时原生支持 toolUseInput / toolUseStop 续传事件，避免参数被截断。
+        const { events } = this.parseAwsEventStreamBuffer(rawStr);
 
-        for (const match of matches) {
-            const potentialJsonBlock = match[1];
-            if (!potentialJsonBlock || potentialJsonBlock.trim().length === 0) {
-                continue;
-            }
+        const pendingByToolUseId = new Map();
+        const orderedToolUseIds = [];
 
-            // 尝试找到完整的 JSON 对象
-            let searchPos = 0;
-            while ((searchPos = potentialJsonBlock.indexOf('}', searchPos + 1)) !== -1) {
-                const jsonCandidate = potentialJsonBlock.substring(0, searchPos + 1).trim();
-                try {
-                    const eventData = JSON.parse(jsonCandidate);
-
-                    // 优先处理结构化工具调用事件
-                    if (eventData.name && eventData.toolUseId) {
-                        if (!currentToolCallDict) {
-                            currentToolCallDict = {
-                                id: eventData.toolUseId,
-                                type: "function",
-                                function: {
-                                    name: toolNameMaps?.fromKiroName ? toolNameMaps.fromKiroName(eventData.name) : eventData.name,
-                                    arguments: ""
-                                }
-                            };
-                        }
-                        if (eventData.input) {
-                            currentToolCallDict.function.arguments += normalizeKiroToolInput(eventData.input);
-                        }
-                        if (eventData.stop) {
-                            try {
-                                const args = JSON.parse(currentToolCallDict.function.arguments);
-                                currentToolCallDict.function.arguments = JSON.stringify(args);
-                            } catch (e) {
-                                logger.warn(`[Kiro] Tool call arguments not valid JSON: ${currentToolCallDict.function.arguments}`);
-                            }
-                            toolCalls.push(currentToolCallDict);
-                            currentToolCallDict = null;
-                        }
-                    } else if (!eventData.followupPrompt && eventData.content) {
-                        // 处理内容，保留原始转义序列以便后续解析工具调用
-                        fullContent += eventData.content;
+        const ensurePending = (toolUseId, name) => {
+            if (!pendingByToolUseId.has(toolUseId)) {
+                pendingByToolUseId.set(toolUseId, {
+                    id: toolUseId,
+                    type: "function",
+                    function: {
+                        name: toolNameMaps?.fromKiroName ? toolNameMaps.fromKiroName(name) : name,
+                        arguments: ""
                     }
-                    break;
-                } catch (e) {
-                    // JSON 解析失败，继续寻找下一个可能的结束位置
-                    continue;
+                });
+                orderedToolUseIds.push(toolUseId);
+            }
+            return pendingByToolUseId.get(toolUseId);
+        };
+
+        const finalizeToolCall = (toolUseId) => {
+            const tc = pendingByToolUseId.get(toolUseId);
+            if (!tc) return;
+            try {
+                const args = JSON.parse(tc.function.arguments || '{}');
+                tc.function.arguments = JSON.stringify(args);
+            } catch (e) {
+                logger.warn(`[Kiro] Tool call arguments not valid JSON: ${tc.function.arguments}`);
+            }
+            toolCalls.push(tc);
+            pendingByToolUseId.delete(toolUseId);
+        };
+
+        for (const ev of events) {
+            if (ev.type === 'content') {
+                if (ev.data) fullContent += ev.data;
+            } else if (ev.type === 'toolUse') {
+                const { toolUseId, name, input, stop } = ev.data || {};
+                if (!toolUseId) continue;
+                const tc = ensurePending(toolUseId, name);
+                if (input) tc.function.arguments += input;
+                if (stop) finalizeToolCall(toolUseId);
+            } else if (ev.type === 'toolUseInput') {
+                const { toolUseId, input } = ev.data || {};
+                if (!input) continue;
+                let targetId = toolUseId;
+                if (!targetId) {
+                    for (let i = orderedToolUseIds.length - 1; i >= 0; i--) {
+                        if (pendingByToolUseId.has(orderedToolUseIds[i])) {
+                            targetId = orderedToolUseIds[i];
+                            break;
+                        }
+                    }
+                }
+                if (targetId && pendingByToolUseId.has(targetId)) {
+                    pendingByToolUseId.get(targetId).function.arguments += input;
+                }
+            } else if (ev.type === 'toolUseStop') {
+                for (let i = orderedToolUseIds.length - 1; i >= 0; i--) {
+                    const id = orderedToolUseIds[i];
+                    if (pendingByToolUseId.has(id)) {
+                        finalizeToolCall(id);
+                        break;
+                    }
                 }
             }
         }
-        
-        // 如果还有未完成的工具调用，添加到列表中
-        if (currentToolCallDict) {
-            toolCalls.push(currentToolCallDict);
+
+        for (const id of orderedToolUseIds) {
+            if (pendingByToolUseId.has(id)) finalizeToolCall(id);
         }
 
         // 检查解析后文本中的 bracket 格式工具调用
