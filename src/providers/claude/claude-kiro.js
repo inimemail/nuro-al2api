@@ -37,6 +37,7 @@ const KIRO_CONSTANTS = {
     BASE_URL: 'https://q.{{region}}.amazonaws.com/generateAssistantResponse',
     DEFAULT_MODEL_NAME: 'claude-sonnet-4-5',
     AXIOS_TIMEOUT: 300000, // 5 minutes timeout for long-running requests
+    STREAM_TIMEOUT: 0, // Disable axios timeout for real streaming requests.
     TOKEN_REFRESH_TIMEOUT: 15000, // 15 seconds timeout for token refresh (shorter to avoid blocking)
     USER_AGENT: 'KiroIDE',
     KIRO_VERSION: '0.11.63',
@@ -2169,11 +2170,16 @@ async saveCredentialsToFile(filePath, newData) {
         let stream = null;
         let releaseThrottle = () => {};
         try {
+            const configuredStreamTimeout = Number(this.config.KIRO_STREAM_TIMEOUT_MS);
+            const streamTimeout = Number.isFinite(configuredStreamTimeout) && configuredStreamTimeout >= 0
+                ? configuredStreamTimeout
+                : KIRO_CONSTANTS.STREAM_TIMEOUT;
             const axiosConfig = {
                 method: 'post',
                 url: requestUrl,
                 data: requestData,
                 headers,
+                timeout: streamTimeout,
                 responseType: 'stream'
             };
             this._applySidecar(axiosConfig);

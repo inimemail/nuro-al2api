@@ -585,7 +585,16 @@ export function isAuthorized(req, requestUrl, REQUIRED_API_KEY) {
 export async function handleUnifiedResponse(res, responsePayload, isStream, statusCode = 200) {
     const validatedStatusCode = ensureValidStatusCode(statusCode);
     if (isStream) {
-        res.writeHead(200, { "Content-Type": "text/event-stream", "Cache-Control": "no-cache", "Connection": "keep-alive", "Transfer-Encoding": "chunked" });
+        res.writeHead(200, {
+            "Content-Type": "text/event-stream",
+            "Cache-Control": "no-cache, no-transform",
+            "Connection": "keep-alive",
+            "Transfer-Encoding": "chunked",
+            "X-Accel-Buffering": "no"
+        });
+        if (typeof res.flushHeaders === 'function') {
+            res.flushHeaders();
+        }
     } else {
         res.writeHead(validatedStatusCode, { 'Content-Type': 'application/json' });
     }
@@ -644,9 +653,37 @@ export async function handleStreamRequest(res, service, model, requestBody, from
     }
 
     let hasToolCall = false;
+    let heartbeatTimer = null;
     let hasMessageStop = false; // 跟踪是否已经发送过结束标志（message_stop / done）
 
     try {
+        if (!isRetry) {
+            if (typeof res.setTimeout === 'function') {
+                res.setTimeout(0);
+            }
+            if (res.socket && typeof res.socket.setKeepAlive === 'function') {
+                res.socket.setKeepAlive(true);
+            }
+
+            const heartbeatIntervalMs = CONFIG?.STREAM_HEARTBEAT_INTERVAL_MS || 15000;
+            heartbeatTimer = setInterval(() => {
+                if (clientDisconnected.value || res.writableEnded) {
+                    clearInterval(heartbeatTimer);
+                    heartbeatTimer = null;
+                    return;
+                }
+
+                try {
+                    res.write(': ping\n\n');
+                } catch (writeErr) {
+                    logger.error('[Stream] Failed to write heartbeat:', writeErr.message);
+                    clientDisconnected.value = true;
+                    clearInterval(heartbeatTimer);
+                    heartbeatTimer = null;
+                }
+            }, heartbeatIntervalMs);
+        }
+
         // fs.writeFile('request'+Date.now()+'.json', JSON.stringify(requestBody));
         // The service returns a stream in its native format (toProvider).
         const needsConversion = getProtocolPrefix(fromProvider) !== getProtocolPrefix(toProvider);
@@ -917,6 +954,11 @@ export async function handleStreamRequest(res, service, model, requestBody, from
         responseClosed = true;
     } finally {
         // 释放并发插槽
+        if (heartbeatTimer) {
+            clearInterval(heartbeatTimer);
+            heartbeatTimer = null;
+        }
+
         if (providerPoolManager && pooluuid) {
             providerPoolManager.releaseSlot(toProvider, pooluuid);
         }
