@@ -517,6 +517,19 @@ function repairJson(jsonStr) {
     return repaired;
 }
 
+function createToolCallTruncatedError(toolCall, reason) {
+    return {
+        type: 'error',
+        error: {
+            type: 'tool_call_truncated',
+            message: `Kiro returned an incomplete tool call for '${toolCall?.name || 'unknown_tool'}'.`,
+            tool_use_id: toolCall?.toolUseId,
+            tool_name: toolCall?.name,
+            reason
+        }
+    };
+}
+
 /**
  * 从损坏的 JSON 中提取关键凭证字段
  * 当标准 JSON 解析和 repairJson 都失败时使用
@@ -1119,6 +1132,24 @@ async saveCredentialsToFile(filePath, newData) {
         return sanitized;
     }
 
+    _formatToolUseAsText(part) {
+        const name = part?.name || 'unknown_tool';
+        const id = part?.id ? ` ${part.id}` : '';
+        let inputText = '';
+        try {
+            inputText = JSON.stringify(part?.input ?? {}, null, 2);
+        } catch (e) {
+            inputText = String(part?.input ?? '');
+        }
+        return `\n\n[Tool call${id}: ${name}]\n${inputText}\n[/Tool call]\n`;
+    }
+
+    _formatToolResultAsText(part) {
+        const id = part?.tool_use_id ? ` ${part.tool_use_id}` : '';
+        const resultText = this.getContentText(part?.content);
+        return `\n\n[Tool result${id}]\n${resultText}\n[/Tool result]\n`;
+    }
+
     /**
      * 统一处理内容，将不同格式的内容转换为文本
      * @param {any} content - 内容对象或数组
@@ -1358,6 +1389,7 @@ async saveCredentialsToFile(filePath, newData) {
         const codewhispererModel = resolveKiroModel(model);
         const toolNameMaps = buildKiroToolNameMaps(tools);
         const toolsContext = buildKiroToolsContext(tools, toolNameMaps);
+        const hasToolDefinitions = Array.isArray(tools) && tools.length > 0;
 
         // tool_choice 指令：CodeWhisperer 没有原生 tool_choice 参数。
         // 注意：不要注入到 system prompt——system 指令会被中间的 history 稀释，
@@ -1423,11 +1455,15 @@ async saveCredentialsToFile(filePath, newData) {
                         if (part.type === 'text') {
                             userInputMessage.content += part.text;
                         } else if (part.type === 'tool_result') {
-                            toolResults.push({
-                                content: [{ text: this.getContentText(part.content) }],
-                                status: 'success',
-                                toolUseId: part.tool_use_id
-                            });
+                            if (hasToolDefinitions) {
+                                toolResults.push({
+                                    content: [{ text: this.getContentText(part.content) }],
+                                    status: 'success',
+                                    toolUseId: part.tool_use_id
+                                });
+                            } else {
+                                userInputMessage.content += this._formatToolResultAsText(part);
+                            }
                         } else if (part.type === 'document') {
                             // Handle PDF / text documents by parsing to inline text
                             const mediaType = part?.source?.media_type || '';
@@ -1508,11 +1544,15 @@ async saveCredentialsToFile(filePath, newData) {
                         } else if (part.type === 'thinking') {
                             thinkingText += (part.thinking ?? part.text ?? '');
                         } else if (part.type === 'tool_use') {
-                            toolUses.push({
-                                input: this._sanitizeToolInput(part.input),
-                                name: toolNameMaps.toKiroName(part.name),
-                                toolUseId: part.id
-                            });
+                            if (hasToolDefinitions) {
+                                toolUses.push({
+                                    input: this._sanitizeToolInput(part.input),
+                                    name: toolNameMaps.toKiroName(part.name),
+                                    toolUseId: part.id
+                                });
+                            } else {
+                                assistantResponseMessage.content += this._formatToolUseAsText(part);
+                            }
                         }
                     }
                 } else {
@@ -1559,11 +1599,15 @@ async saveCredentialsToFile(filePath, newData) {
                     } else if (part.type === 'thinking') {
                         thinkingText += (part.thinking ?? part.text ?? '');
                     } else if (part.type === 'tool_use') {
-                        assistantResponseMessage.toolUses.push({
-                            input: this._sanitizeToolInput(part.input),
-                            name: toolNameMaps.toKiroName(part.name),
-                            toolUseId: part.id
-                        });
+                        if (hasToolDefinitions) {
+                            assistantResponseMessage.toolUses.push({
+                                input: this._sanitizeToolInput(part.input),
+                                name: toolNameMaps.toKiroName(part.name),
+                                toolUseId: part.id
+                            });
+                        } else {
+                            assistantResponseMessage.content += this._formatToolUseAsText(part);
+                        }
                     }
                 }
             } else {
@@ -1610,17 +1654,25 @@ async saveCredentialsToFile(filePath, newData) {
                     if (part.type === 'text') {
                         currentContent += part.text;
                     } else if (part.type === 'tool_result') {
-                        currentToolResults.push({
-                            content: [{ text: this.getContentText(part.content) }],
-                            status: 'success',
-                            toolUseId: part.tool_use_id
-                        });
+                        if (hasToolDefinitions) {
+                            currentToolResults.push({
+                                content: [{ text: this.getContentText(part.content) }],
+                                status: 'success',
+                                toolUseId: part.tool_use_id
+                            });
+                        } else {
+                            currentContent += this._formatToolResultAsText(part);
+                        }
                     } else if (part.type === 'tool_use') {
-                        currentToolUses.push({
-                            input: this._sanitizeToolInput(part.input),
-                            name: toolNameMaps.toKiroName(part.name),
-                            toolUseId: part.id
-                        });
+                        if (hasToolDefinitions) {
+                            currentToolUses.push({
+                                input: this._sanitizeToolInput(part.input),
+                                name: toolNameMaps.toKiroName(part.name),
+                                toolUseId: part.id
+                            });
+                        } else {
+                            currentContent += this._formatToolUseAsText(part);
+                        }
                     } else if (part.type === 'document') {
                         // Handle PDF / text documents by parsing to inline text
                         const mediaType = part?.source?.media_type || '';
@@ -2842,6 +2894,7 @@ async saveCredentialsToFile(filePath, newData) {
             let totalContent = '';
             let outputTokens = 0;
             let toolCalls = [];
+            let fatalStreamError = null;
             let currentToolCall = null; // 仅作"最近一次活跃调用"指针
             let toolUseBlockIndexes = new Map(); // toolUseId -> content block index
             // 新：多工具并发/交错时的 map 累积，避免覆盖丢片段
@@ -2863,7 +2916,13 @@ async saveCredentialsToFile(filePath, newData) {
                         logger.warn(`[Kiro Stream] Tool '${p.name}' input repaired via repairJson`);
                     } catch (e2) {
                         const diag = diagnoseJsonTruncation(p.input);
-                        if (diag) logger.warn(`[Kiro Stream] Tool '${p.name}' truncated input: ${diag}`);
+                        logger.warn(`[Kiro Stream] Tool '${p.name}' invalid input: ${diag || e2.message}`);
+                        fatalStreamError = createToolCallTruncatedError(p, diag || e2.message);
+                        outEvents.push({ type: "content_block_stop", index: p.blockIndex });
+                        outEvents.push(fatalStreamError);
+                        toolUseBlockIndexes.delete(toolUseId);
+                        pendingToolCalls.delete(toolUseId);
+                        return;
                     }
                 }
                 sink.push({
@@ -2905,6 +2964,7 @@ async saveCredentialsToFile(filePath, newData) {
                     totalContent = '';
                     outputTokens = 0;
                     toolCalls = [];
+                    fatalStreamError = null;
                     currentToolCall = null;
                     toolUseBlockIndexes = new Map();
                     pendingToolCalls = new Map();
@@ -3116,6 +3176,7 @@ async saveCredentialsToFile(filePath, newData) {
 
                     if (toolEvents.length > 0) {
                         yield* pushEvents(toolEvents);
+                        if (fatalStreamError) return;
                     }
                 } else if (event.type === 'toolUseInput') {
                     // input 续传：优先按 toolUseId 归属，缺失则落到最近一个未完成调用
@@ -3162,6 +3223,7 @@ async saveCredentialsToFile(filePath, newData) {
                                 currentToolCall = null;
                             }
                             if (finalEvents.length > 0) yield* pushEvents(finalEvents);
+                            if (fatalStreamError) return;
                         }
                     }
                 }
@@ -3173,6 +3235,7 @@ async saveCredentialsToFile(filePath, newData) {
                     const finalEvents = [];
                     finalizeStreamToolCall(id, finalEvents, toolCalls);
                     if (finalEvents.length > 0) yield* pushEvents(finalEvents);
+                    if (fatalStreamError) return;
                 }
             }
             currentToolCall = null;
