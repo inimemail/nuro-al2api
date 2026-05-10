@@ -9,6 +9,11 @@ import { autoLinkProviderConfigs } from '../services/service-manager.js';
 import { CONFIG } from '../core/config-manager.js';
 import { getGoogleAuthProxyConfig } from '../utils/proxy-utils.js';
 
+const DEFAULT_GEMINI_OAUTH_CLIENT_ID = '681255809395-oo8ft2oprdrnp9e3aqf6av3hmdib135j.apps.googleusercontent.com';
+const DEFAULT_GEMINI_OAUTH_CLIENT_SECRET = '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';
+const DEFAULT_ANTIGRAVITY_OAUTH_CLIENT_ID = '1071006060591-tmhssin2h21lcre235vtolojh4g403ep.apps.googleusercontent.com';
+const DEFAULT_ANTIGRAVITY_OAUTH_CLIENT_SECRET = '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';
+
 /**
  * OAuth 提供商配置
  */
@@ -16,6 +21,8 @@ const OAUTH_PROVIDERS = {
     'gemini-cli-oauth': {
         clientIdConfigKey: 'GEMINI_OAUTH_CLIENT_ID',
         clientSecretConfigKey: 'GEMINI_OAUTH_CLIENT_SECRET',
+        defaultClientId: DEFAULT_GEMINI_OAUTH_CLIENT_ID,
+        defaultClientSecret: DEFAULT_GEMINI_OAUTH_CLIENT_SECRET,
         port: 8085,
         credentialsDir: '.gemini',
         credentialsFile: 'oauth_creds.json',
@@ -25,6 +32,8 @@ const OAUTH_PROVIDERS = {
     'gemini-antigravity': {
         clientIdConfigKey: 'ANTIGRAVITY_OAUTH_CLIENT_ID',
         clientSecretConfigKey: 'ANTIGRAVITY_OAUTH_CLIENT_SECRET',
+        defaultClientId: DEFAULT_ANTIGRAVITY_OAUTH_CLIENT_ID,
+        defaultClientSecret: DEFAULT_ANTIGRAVITY_OAUTH_CLIENT_SECRET,
         port: 8086,
         credentialsDir: '.antigravity',
         credentialsFile: 'oauth_creds.json',
@@ -34,8 +43,8 @@ const OAUTH_PROVIDERS = {
 };
 
 function resolveOAuthClientConfig(config, providerKey) {
-    const clientId = CONFIG[config.clientIdConfigKey] || process.env[config.clientIdConfigKey];
-    const clientSecret = CONFIG[config.clientSecretConfigKey] || process.env[config.clientSecretConfigKey];
+    const clientId = CONFIG[config.clientIdConfigKey] || process.env[config.clientIdConfigKey] || config.defaultClientId;
+    const clientSecret = CONFIG[config.clientSecretConfigKey] || process.env[config.clientSecretConfigKey] || config.defaultClientSecret;
 
     if (!clientId || !clientSecret) {
         throw new Error(`${config.logPrefix} Missing OAuth client config. Set ${config.clientIdConfigKey} and ${config.clientSecretConfigKey}.`);

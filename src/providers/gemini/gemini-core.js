@@ -22,14 +22,16 @@ const CREDENTIALS_DIR = '.gemini';
 const CREDENTIALS_FILE = 'oauth_creds.json';
 const DEFAULT_CODE_ASSIST_ENDPOINT = 'https://cloudcode-pa.googleapis.com';
 const DEFAULT_CODE_ASSIST_API_VERSION = 'v1internal';
+const DEFAULT_GEMINI_OAUTH_CLIENT_ID = '681255809395-oo8ft2oprdrnp9e3aqf6av3hmdib135j.apps.googleusercontent.com';
+const DEFAULT_GEMINI_OAUTH_CLIENT_SECRET = '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';
 const GEMINI_MODELS = getProviderModels(MODEL_PROVIDER.GEMINI_CLI);
 const ANTI_TRUNCATION_MODELS = GEMINI_MODELS.map(model => `anti-${model}`);
 const GEMINI_CLI_VERSION = '0.31.0';
 const GEMINI_CLI_API_CLIENT_HEADER = 'google-genai-sdk/1.41.0 gl-node/v22.19.0';
 
 function resolveGeminiOAuthClientConfig(config) {
-    const clientId = config.GEMINI_OAUTH_CLIENT_ID || process.env.GEMINI_OAUTH_CLIENT_ID;
-    const clientSecret = config.GEMINI_OAUTH_CLIENT_SECRET || process.env.GEMINI_OAUTH_CLIENT_SECRET;
+    const clientId = config.GEMINI_OAUTH_CLIENT_ID || process.env.GEMINI_OAUTH_CLIENT_ID || DEFAULT_GEMINI_OAUTH_CLIENT_ID;
+    const clientSecret = config.GEMINI_OAUTH_CLIENT_SECRET || process.env.GEMINI_OAUTH_CLIENT_SECRET || DEFAULT_GEMINI_OAUTH_CLIENT_SECRET;
 
     if (!clientId || !clientSecret) {
         throw new Error('[Gemini] Missing OAuth client config. Set GEMINI_OAUTH_CLIENT_ID and GEMINI_OAUTH_CLIENT_SECRET.');
