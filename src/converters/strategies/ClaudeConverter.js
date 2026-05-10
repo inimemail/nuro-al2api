@@ -254,6 +254,11 @@ export class ClaudeConverter extends BaseConverter {
             openaiRequest.tool_choice = "auto";
         }
 
+        // 处理结构化输出
+        if (claudeRequest.response_format) {
+            openaiRequest.response_format = claudeRequest.response_format;
+        }
+
         // 处理thinking转换
         if (claudeRequest.thinking && claudeRequest.thinking.type === "enabled") {
             const budgetTokens = claudeRequest.thinking.budget_tokens;
@@ -724,9 +729,35 @@ export class ClaudeConverter extends BaseConverter {
                                 url: `data:${block.source.media_type};base64,${block.source.data}`
                             }
                         });
+                    } else if (block.source && block.source.type === 'url') {
+                        contentArray.push({
+                            type: 'image_url',
+                            image_url: { url: block.source.url }
+                        });
                     }
                     break;
-                    
+
+                case 'document':
+                    if (block.source) {
+                        if (block.source.type === 'base64') {
+                            contentArray.push({
+                                type: 'text',
+                                text: `[Document: ${block.source.media_type || 'application/pdf'}]\n${block.title ? `Title: ${block.title}\n` : ''}(base64 content omitted)`
+                            });
+                        } else if (block.source.type === 'url') {
+                            contentArray.push({
+                                type: 'text',
+                                text: `[Document URL: ${block.source.url}]${block.title ? ` (${block.title})` : ''}`
+                            });
+                        } else if (block.source.type === 'text') {
+                            contentArray.push({
+                                type: 'text',
+                                text: block.source.data || ''
+                            });
+                        }
+                    }
+                    break;
+
                 case 'tool_use':
                     contentArray.push({
                         type: 'text',
@@ -994,11 +1025,40 @@ export class ClaudeConverter extends BaseConverter {
                                             data: block.source.data
                                         }
                                     });
+                                } else if (block.source && block.source.type === 'url') {
+                                    parts.push({
+                                        fileData: {
+                                            mimeType: block.source.media_type || 'image/jpeg',
+                                            fileUri: block.source.url
+                                        }
+                                    });
+                                }
+                                break;
+
+                            case 'document':
+                                if (block.source) {
+                                    if (block.source.type === 'base64') {
+                                        parts.push({
+                                            inlineData: {
+                                                mimeType: block.source.media_type || 'application/pdf',
+                                                data: block.source.data
+                                            }
+                                        });
+                                    } else if (block.source.type === 'url') {
+                                        parts.push({
+                                            fileData: {
+                                                mimeType: block.source.media_type || 'application/pdf',
+                                                fileUri: block.source.url
+                                            }
+                                        });
+                                    } else if (block.source.type === 'text') {
+                                        parts.push({ text: block.source.data || '' });
+                                    }
                                 }
                                 break;
                         }
                     });
-                    
+
                     if (parts.length > 0) {
                         geminiRequest.contents.push({
                             role: geminiRole,
@@ -1043,6 +1103,20 @@ export class ClaudeConverter extends BaseConverter {
             }
         }
         
+        // 处理结构化输出 response_format
+        if (claudeRequest.response_format) {
+            const fmt = claudeRequest.response_format;
+            if (fmt.type === 'json_object') {
+                generationConfig.responseMimeType = 'application/json';
+            } else if (fmt.type === 'json_schema' && fmt.json_schema) {
+                generationConfig.responseMimeType = 'application/json';
+                const schema = fmt.json_schema.schema || fmt.json_schema;
+                if (schema && typeof schema === 'object') {
+                    generationConfig.responseSchema = schema;
+                }
+            }
+        }
+
         if (Object.keys(generationConfig).length > 0) {
             geminiRequest.generationConfig = generationConfig;
         }

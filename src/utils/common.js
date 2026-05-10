@@ -597,6 +597,7 @@ function buildAnthropicHeaders() {
     const now = new Date();
     const resetTime = new Date(now.getTime() + 60000); // reset in 60s
     return {
+        'anthropic-version': '2023-06-01',
         'anthropic-ratelimit-requests-limit': '4000',
         'anthropic-ratelimit-requests-remaining': '3999',
         'anthropic-ratelimit-requests-reset': resetTime.toISOString(),
