@@ -728,17 +728,24 @@ export class KiroApiService {
         const kiroVersion = KIRO_CONSTANTS.KIRO_VERSION;
         const { osName, nodeVersion } = getSystemRuntimeInfo();
 
-        // 配置 HTTP/HTTPS agent 限制连接池大小，避免资源泄漏
+        // 配置 HTTP/HTTPS agent：开启 keep-alive，保留更多空闲连接以复用 TLS 握手。
+        // maxFreeSockets 默认 5 太低，会频繁释放热连接导致下次请求重新握手（多几百 ms）。
+        // scheduling: 'lifo' 优先复用最近使用的 socket，命中 TCP/TLS 缓存更好。
+        const keepAliveMsecs = 30_000;
         const httpAgent = new http.Agent({
             keepAlive: true,
-            maxSockets: 100,        // 每个主机最多 100 个连接
-            maxFreeSockets: 5,     // 最多保留 5 个空闲连接
+            keepAliveMsecs,
+            maxSockets: 100,
+            maxFreeSockets: 50,
+            scheduling: 'lifo',
             timeout: KIRO_CONSTANTS.AXIOS_TIMEOUT,
         });
         const httpsAgent = new https.Agent({
             keepAlive: true,
+            keepAliveMsecs,
             maxSockets: 100,
-            maxFreeSockets: 5,
+            maxFreeSockets: 50,
+            scheduling: 'lifo',
             timeout: KIRO_CONSTANTS.AXIOS_TIMEOUT,
         });
         
@@ -2387,12 +2394,18 @@ async saveCredentialsToFile(filePath, newData) {
                         }
                     });
                 }
-                // 处理工具调用的结束事件（只有 stop 字段，且不包含 contextUsagePercentage）
-                else if (parsed.stop !== undefined && parsed.contextUsagePercentage === undefined) {
+                // 处理工具调用的结束事件：必须是 stop=true 的"纯结束"事件，
+                // 排除 {stop:false, contextUsagePercentage:...} 这类心跳、
+                // 以及 {stop:true, input:"..."} 这类带收尾参数的事件（后者走 toolUseInput+toolUseStop 组合更保险）。
+                else if (parsed.stop === true
+                    && parsed.contextUsagePercentage === undefined
+                    && parsed.input === undefined
+                    && parsed.name === undefined
+                    && parsed.content === undefined) {
                     events.push({
                         type: 'toolUseStop',
                         data: {
-                            stop: parsed.stop
+                            stop: true
                         }
                     });
                 }
@@ -2751,8 +2764,39 @@ async saveCredentialsToFile(filePath, newData) {
             let totalContent = '';
             let outputTokens = 0;
             let toolCalls = [];
-            let currentToolCall = null; // 用于累积结构化工具调用
+            let currentToolCall = null; // 仅作"最近一次活跃调用"指针
             let toolUseBlockIndexes = new Map(); // toolUseId -> content block index
+            // 新：多工具并发/交错时的 map 累积，避免覆盖丢片段
+            let pendingToolCalls = new Map(); // toolUseId -> { toolUseId, name, input, blockIndex }
+            let pendingOrder = []; // 插入顺序，用于回落"最近未完成调用"
+
+            // 收尾一个工具调用：解析 input JSON（失败时尝试 repairJson 一次），push 到 toolCalls，
+            // 并把 content_block_stop 追加到 outEvents 数组里。
+            const finalizeStreamToolCall = (toolUseId, outEvents, sink) => {
+                const p = pendingToolCalls.get(toolUseId);
+                if (!p) return;
+                let parsedInput = p.input;
+                try {
+                    parsedInput = JSON.parse(p.input || '{}');
+                } catch (e) {
+                    // 常见的 JSON 截断/小瑕疵（尾逗号、未引号键），先 repair 再试一次
+                    try {
+                        parsedInput = JSON.parse(repairJson(p.input || '{}'));
+                        logger.warn(`[Kiro Stream] Tool '${p.name}' input repaired via repairJson`);
+                    } catch (e2) {
+                        const diag = diagnoseJsonTruncation(p.input);
+                        if (diag) logger.warn(`[Kiro Stream] Tool '${p.name}' truncated input: ${diag}`);
+                    }
+                }
+                sink.push({
+                    toolUseId: p.toolUseId,
+                    name: p.name,
+                    input: parsedInput
+                });
+                outEvents.push({ type: "content_block_stop", index: p.blockIndex });
+                toolUseBlockIndexes.delete(toolUseId);
+                pendingToolCalls.delete(toolUseId);
+            };
 
             const estimatedInputTokens = this.estimateInputTokens(requestBody);
             const maxEmptyRetries = Number(this.config.KIRO_EMPTY_RESPONSE_MAX_RETRIES) || 1;
@@ -2785,6 +2829,8 @@ async saveCredentialsToFile(filePath, newData) {
                     toolCalls = [];
                     currentToolCall = null;
                     toolUseBlockIndexes = new Map();
+                    pendingToolCalls = new Map();
+                    pendingOrder = [];
                     contextUsagePercentage = null;
                     // Reset stream state
                     streamState.buffer = '';
@@ -2940,88 +2986,53 @@ async saveCredentialsToFile(filePath, newData) {
                         // 遇到工具调用时，立即关闭文本块，避免前端等待到流结束才看到 content_block_stop
                         toolEvents.push(...stopBlock(streamState.textBlockIndex));
 
-                        // 同一工具调用续传
-                        if (currentToolCall && currentToolCall.toolUseId === tc.toolUseId) {
-                            currentToolCall.input += tc.input || '';
-                        } else {
-                            // 切换到新的工具调用前，先收尾旧调用
-                            if (currentToolCall) {
-                                const prevBlockIndex = toolUseBlockIndexes.get(currentToolCall.toolUseId);
-                                let parsedInput = currentToolCall.input;
-                                try {
-                                    parsedInput = JSON.parse(currentToolCall.input);
-                                } catch (e) {
-                                    const diag = diagnoseJsonTruncation(currentToolCall.input);
-                                    if (diag) logger.warn(`[Kiro Stream] Tool '${currentToolCall.name}' truncated input: ${diag}`);
-                                }
-                                toolCalls.push({
-                                    toolUseId: currentToolCall.toolUseId,
-                                    name: currentToolCall.name,
-                                    input: parsedInput
-                                });
-                                if (prevBlockIndex != null) {
-                                    toolEvents.push({ type: "content_block_stop", index: prevBlockIndex });
-                                    toolUseBlockIndexes.delete(currentToolCall.toolUseId);
-                                }
-                            }
-
+                        // 用 map 维护所有活跃工具调用：避免"多工具交错 / 同一工具多次开始"
+                        // 把旧调用覆盖丢片段（read/edit 第一次失败的主因之一）。
+                        let pending = pendingToolCalls.get(tc.toolUseId);
+                        if (!pending) {
                             const blockIndex = streamState.nextBlockIndex++;
                             toolUseBlockIndexes.set(tc.toolUseId, blockIndex);
+                            pending = {
+                                toolUseId: tc.toolUseId,
+                                name: tc.name,
+                                input: '',
+                                blockIndex
+                            };
+                            pendingToolCalls.set(tc.toolUseId, pending);
+                            pendingOrder.push(tc.toolUseId);
+
                             toolEvents.push({
                                 type: "content_block_start",
                                 index: blockIndex,
                                 content_block: {
                                     type: "tool_use",
-                                    id: tc.toolUseId || `tool_${uuidv4()}`,
+                                    id: tc.toolUseId,
                                     name: tc.name,
                                     input: {}
                                 }
                             });
-
-                            currentToolCall = {
-                                toolUseId: tc.toolUseId,
-                                name: tc.name,
-                                input: ''
-                            };
-                            currentToolCall.input += tc.input || '';
                         }
+                        pending.input += tc.input || '';
+                        currentToolCall = pending;
 
                         // 实时向前端推送工具参数增量
                         if (tc.input) {
-                            const blockIndex = toolUseBlockIndexes.get(tc.toolUseId);
-                            if (blockIndex != null) {
-                                toolEvents.push({
-                                    type: "content_block_delta",
-                                    index: blockIndex,
-                                    delta: {
-                                        type: "input_json_delta",
-                                        partial_json: tc.input
-                                    }
-                                });
-                            }
+                            toolEvents.push({
+                                type: "content_block_delta",
+                                index: pending.blockIndex,
+                                delta: {
+                                    type: "input_json_delta",
+                                    partial_json: tc.input
+                                }
+                            });
                         }
 
-                        // 如果这个事件包含 stop，立即结束当前工具块
-                        if (tc.stop && currentToolCall) {
-                            let parsedInput = currentToolCall.input;
-                            try {
-                                parsedInput = JSON.parse(currentToolCall.input);
-                            } catch (e) {
-                                const diag = diagnoseJsonTruncation(currentToolCall.input);
-                                if (diag) logger.warn(`[Kiro Stream] Tool '${currentToolCall.name}' truncated input: ${diag}`);
+                        // 本事件带 stop，立即收尾此工具块
+                        if (tc.stop) {
+                            finalizeStreamToolCall(tc.toolUseId, toolEvents, toolCalls);
+                            if (currentToolCall && currentToolCall.toolUseId === tc.toolUseId) {
+                                currentToolCall = null;
                             }
-                            toolCalls.push({
-                                toolUseId: currentToolCall.toolUseId,
-                                name: currentToolCall.name,
-                                input: parsedInput
-                            });
-
-                            const blockIndex = toolUseBlockIndexes.get(currentToolCall.toolUseId);
-                            if (blockIndex != null) {
-                                toolEvents.push({ type: "content_block_stop", index: blockIndex });
-                                toolUseBlockIndexes.delete(currentToolCall.toolUseId);
-                            }
-                            currentToolCall = null;
                         }
                     }
 
@@ -3029,69 +3040,64 @@ async saveCredentialsToFile(filePath, newData) {
                         yield* pushEvents(toolEvents);
                     }
                 } else if (event.type === 'toolUseInput') {
-                    // 工具调用的 input 续传事件
+                    // input 续传：优先按 toolUseId 归属，缺失则落到最近一个未完成调用
                     const inputDelta = normalizeKiroToolInput(event.input);
-                    // 统计 input 内容到 totalContent（用于 token 计算）
-                    if (inputDelta) {
-                        totalContent += inputDelta;
-                    }
-                    if (currentToolCall) {
-                        currentToolCall.input += inputDelta;
-                        const blockIndex = toolUseBlockIndexes.get(currentToolCall.toolUseId);
-                        if (blockIndex != null && inputDelta) {
-                            yield* pushEvents([{
-                                type: "content_block_delta",
-                                index: blockIndex,
-                                delta: {
-                                    type: "input_json_delta",
-                                    partial_json: inputDelta
-                                }
-                            }]);
+                    if (!inputDelta) continue;
+                    totalContent += inputDelta;
+
+                    let targetId = event.toolUseId;
+                    if (!targetId) {
+                        for (let i = pendingOrder.length - 1; i >= 0; i--) {
+                            if (pendingToolCalls.has(pendingOrder[i])) {
+                                targetId = pendingOrder[i];
+                                break;
+                            }
                         }
+                    }
+                    const pending = targetId ? pendingToolCalls.get(targetId) : null;
+                    if (pending) {
+                        pending.input += inputDelta;
+                        currentToolCall = pending;
+                        yield* pushEvents([{
+                            type: "content_block_delta",
+                            index: pending.blockIndex,
+                            delta: {
+                                type: "input_json_delta",
+                                partial_json: inputDelta
+                            }
+                        }]);
                     }
                 } else if (event.type === 'toolUseStop') {
-                    // 工具调用结束事件
-                    if (currentToolCall && event.stop) {
-                        let parsedInput = currentToolCall.input;
-                        try {
-                            parsedInput = JSON.parse(currentToolCall.input);
-                        } catch (e) {
-                            // input 不是有效 JSON，保持原样
+                    // 工具结束：收尾最近一个未完成调用
+                    if (event.stop) {
+                        let targetId = null;
+                        for (let i = pendingOrder.length - 1; i >= 0; i--) {
+                            if (pendingToolCalls.has(pendingOrder[i])) {
+                                targetId = pendingOrder[i];
+                                break;
+                            }
                         }
-                        toolCalls.push({
-                            toolUseId: currentToolCall.toolUseId,
-                            name: currentToolCall.name,
-                            input: parsedInput
-                        });
-
-                        const blockIndex = toolUseBlockIndexes.get(currentToolCall.toolUseId);
-                        if (blockIndex != null) {
-                            yield* pushEvents([{ type: "content_block_stop", index: blockIndex }]);
-                            toolUseBlockIndexes.delete(currentToolCall.toolUseId);
+                        if (targetId) {
+                            const finalEvents = [];
+                            finalizeStreamToolCall(targetId, finalEvents, toolCalls);
+                            if (currentToolCall && currentToolCall.toolUseId === targetId) {
+                                currentToolCall = null;
+                            }
+                            if (finalEvents.length > 0) yield* pushEvents(finalEvents);
                         }
-                        currentToolCall = null;
                     }
                 }
             }
-            
-            // 处理未完成的工具调用（如果流提前结束）
-            if (currentToolCall) {
-                let parsedInput = currentToolCall.input;
-                try {
-                    parsedInput = JSON.parse(currentToolCall.input);
-                } catch (e) {}
-                toolCalls.push({
-                    toolUseId: currentToolCall.toolUseId,
-                    name: currentToolCall.name,
-                    input: parsedInput
-                });
-                const blockIndex = toolUseBlockIndexes.get(currentToolCall.toolUseId);
-                if (blockIndex != null) {
-                    yield* pushEvents([{ type: "content_block_stop", index: blockIndex }]);
-                    toolUseBlockIndexes.delete(currentToolCall.toolUseId);
+
+            // 流结束兜底：收尾所有剩余工具调用
+            for (const id of [...pendingOrder]) {
+                if (pendingToolCalls.has(id)) {
+                    const finalEvents = [];
+                    finalizeStreamToolCall(id, finalEvents, toolCalls);
+                    if (finalEvents.length > 0) yield* pushEvents(finalEvents);
                 }
-                currentToolCall = null;
             }
+            currentToolCall = null;
 
             if (thinkingRequested && (streamState.inThinking || streamState.buffer || streamState.pendingTextBeforeThinking)) {
                 if (streamState.inThinking) {
