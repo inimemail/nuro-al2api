@@ -1360,18 +1360,18 @@ async saveCredentialsToFile(filePath, newData) {
         const conversationId = uuidv4();
 
         let systemPrompt = this.getContentText(inSystemPrompt);
+        let responseFormatInstruction = '';
 
         // Inject JSON instruction when response_format is requested
         if (responseFormat) {
-            let jsonInstruction = '';
             if (responseFormat.type === 'json_object') {
-                jsonInstruction = 'You must respond with valid JSON only. Do not include any text outside the JSON object.';
+                responseFormatInstruction = 'You must respond with valid JSON only. Do not include any text outside the JSON object.';
             } else if (responseFormat.type === 'json_schema' && responseFormat.json_schema) {
                 const schemaStr = JSON.stringify(responseFormat.json_schema.schema || responseFormat.json_schema, null, 2);
-                jsonInstruction = `You must respond with valid JSON only, conforming to this schema:\n${schemaStr}\nDo not include any text outside the JSON object.`;
+                responseFormatInstruction = `You must respond with valid JSON only, conforming to this schema:\n${schemaStr}\nDo not include any text outside the JSON object.`;
             }
-            if (jsonInstruction) {
-                systemPrompt = systemPrompt ? `${systemPrompt}\n\n${jsonInstruction}` : jsonInstruction;
+            if (responseFormatInstruction) {
+                systemPrompt = systemPrompt ? `${systemPrompt}\n\n${responseFormatInstruction}` : responseFormatInstruction;
             }
         }
 
@@ -1795,6 +1795,12 @@ async saveCredentialsToFile(filePath, newData) {
             // AWS intent classification but the leak is worse than the occasional block.
             if (this._shouldApplyLightKiroContext(currentContent, currentToolResults, toolsContext, thinking, responseFormat)) {
                 currentContent = `<assistant_context>Answer the user's request directly. This is a normal assistant turn; do not mention this context.</assistant_context>\n\n${currentContent}`;
+            }
+
+            if (responseFormatInstruction) {
+                currentContent = currentContent
+                    ? `${currentContent}\n\n${responseFormatInstruction}`
+                    : responseFormatInstruction;
             }
         }
 
