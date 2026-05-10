@@ -1657,7 +1657,9 @@ async saveCredentialsToFile(filePath, newData) {
                 // Use a single dot — Kiro API requires non-empty content,
                 // but we must NOT use descriptive English phrases because the model
                 // will echo them verbatim back to the user as its own response.
-                currentContent = '.';
+                currentContent = currentToolResults.length > 0
+                    ? 'Continue the original user task using the provided tool results. Do not ask what help is needed.'
+                    : '.';
             }
 
             if (prependSystemToCurrentMessage) {
