@@ -1272,10 +1272,24 @@ async saveCredentialsToFile(filePath, newData) {
     /**
      * Build CodeWhisperer request from OpenAI messages
      */
-    async buildCodewhispererRequest(messages, model, tools = null, inSystemPrompt = null, thinking = null, toolChoice = null) {
+    async buildCodewhispererRequest(messages, model, tools = null, inSystemPrompt = null, thinking = null, toolChoice = null, responseFormat = null) {
         const conversationId = uuidv4();
-        
+
         let systemPrompt = this.getContentText(inSystemPrompt);
+
+        // Inject JSON instruction when response_format is requested
+        if (responseFormat) {
+            let jsonInstruction = '';
+            if (responseFormat.type === 'json_object') {
+                jsonInstruction = 'You must respond with valid JSON only. Do not include any text outside the JSON object.';
+            } else if (responseFormat.type === 'json_schema' && responseFormat.json_schema) {
+                const schemaStr = JSON.stringify(responseFormat.json_schema.schema || responseFormat.json_schema, null, 2);
+                jsonInstruction = `You must respond with valid JSON only, conforming to this schema:\n${schemaStr}\nDo not include any text outside the JSON object.`;
+            }
+            if (jsonInstruction) {
+                systemPrompt = systemPrompt ? `${systemPrompt}\n\n${jsonInstruction}` : jsonInstruction;
+            }
+        }
         
         const processedMessages = messages.map(message => ({
             ...message,
@@ -1428,6 +1442,9 @@ async saveCredentialsToFile(filePath, newData) {
                                 }
                             } else if (part?.source?.type === 'text' && part?.source?.data) {
                                 userInputMessage.content += `\n\n[Document]\n${part.source.data}\n[End of Document]\n\n`;
+                            } else if (part?.source?.type === 'url' && part?.source?.url) {
+                                const label = part?.title ? `Document: ${part.title}` : 'Document';
+                                userInputMessage.content += `\n\n[${label}]\n[Source URL: ${part.source.url}]\n[End of Document]\n\n`;
                             }
                         } else if (part.type === 'image') {
                             if (shouldKeepImages) {
@@ -1618,6 +1635,9 @@ async saveCredentialsToFile(filePath, newData) {
                             }
                         } else if (part?.source?.type === 'text' && part?.source?.data) {
                             currentContent += `\n\n[Document]\n${part.source.data}\n[End of Document]\n\n`;
+                        } else if (part?.source?.type === 'url' && part?.source?.url) {
+                            const label = part?.title ? `Document: ${part.title}` : 'Document';
+                            currentContent += `\n\n[${label}]\n[Source URL: ${part.source.url}]\n[End of Document]\n\n`;
                         }
                     } else if (part.type === 'image') {
                         currentImages.push({
@@ -1863,7 +1883,7 @@ async saveCredentialsToFile(filePath, newData) {
             throw new Error('No messages found in request body');
         }
 
-        const requestData = await this.buildCodewhispererRequest(messages, model, body.tools, body.system, body.thinking, body.tool_choice);
+        const requestData = await this.buildCodewhispererRequest(messages, model, body.tools, body.system, body.thinking, body.tool_choice, body.response_format);
 
         try {
             const token = this.accessToken; // Use the already initialized token
@@ -2298,7 +2318,7 @@ async saveCredentialsToFile(filePath, newData) {
         const contentForClaude = thinkingRequested
             ? this._toClaudeContentBlocksFromKiroText(responseText)
             : responseText;
-        return this.buildClaudeResponse(contentForClaude, false, 'assistant', model, toolCalls, inputTokens);
+        return this.buildClaudeResponse(contentForClaude, false, 'assistant', model, toolCalls, inputTokens, requestBody);
     }
 
     /**
@@ -2459,7 +2479,7 @@ async saveCredentialsToFile(filePath, newData) {
             throw new Error('No messages found in request body');
         }
 
-        const requestData = await this.buildCodewhispererRequest(messages, model, body.tools, body.system, body.thinking, body.tool_choice);
+        const requestData = await this.buildCodewhispererRequest(messages, model, body.tools, body.system, body.thinking, body.tool_choice, body.response_format);
         const toolNameMaps = requestData._kiroToolNameMaps;
 
         const token = this.accessToken;
@@ -2534,6 +2554,15 @@ async saveCredentialsToFile(filePath, newData) {
                         yield { type: 'toolUseStop', stop: event.data.stop };
                     } else if (event.type === 'contextUsage') {
                         yield { type: 'contextUsage', contextUsagePercentage: event.data.contextUsagePercentage };
+                    }
+                }
+            }
+            // Flush any remaining buffer data after stream ends (handles split chunks)
+            if (buffer.trim()) {
+                const { events: remainingEvents } = this.parseAwsEventStreamBuffer(buffer);
+                for (const event of remainingEvents) {
+                    if (event.type === 'content' && event.data) {
+                        yield { type: 'content', content: event.data };
                     }
                 }
             }
@@ -2807,7 +2836,7 @@ async saveCredentialsToFile(filePath, newData) {
                     id: messageId,
                     type: "message",
                     role: "assistant",
-                    model: model,
+                    model: requestBody?.model || model,
                     usage: {
                         input_tokens: estimatedInputTokens,
                         output_tokens: 0,
@@ -3265,7 +3294,9 @@ async saveCredentialsToFile(filePath, newData) {
     /**
      * Build Claude compatible response object
      */
-    buildClaudeResponse(content, isStream = false, role = 'assistant', model, toolCalls = null, inputTokens = 0) {
+    buildClaudeResponse(content, isStream = false, role = 'assistant', model, toolCalls = null, inputTokens = 0, requestBody = null) {
+        // Use the original model name from the request, not the Kiro-mapped internal name
+        const originalModel = requestBody?.model || model;
         const messageId = generateAnthropicMessageId();
 
         if (isStream) {
@@ -3280,7 +3311,7 @@ async saveCredentialsToFile(filePath, newData) {
                     id: messageId,
                     type: "message",
                     role: role,
-                    model: model,
+                    model: originalModel,
                     usage: {
                         input_tokens: inputTokens,
                         output_tokens: 0 // Will be updated in message_delta
@@ -3457,7 +3488,7 @@ async saveCredentialsToFile(filePath, newData) {
                 id: messageId,
                 type: "message",
                 role: role,
-                model: model,
+                model: originalModel,
                 stop_reason: stopReason,
                 stop_sequence: null,
                 usage: {

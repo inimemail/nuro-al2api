@@ -6,6 +6,7 @@ import path from 'path';
 
 // 用量缓存文件路径
 const USAGE_CACHE_FILE = path.join(process.cwd(), 'configs', 'usage-cache.json');
+const CACHE_TTL_MS = 60 * 60 * 1000; // 1 hour
 
 /**
  * 读取用量缓存文件
@@ -15,7 +16,15 @@ export async function readUsageCache() {
     try {
         if (existsSync(USAGE_CACHE_FILE)) {
             const content = await fs.readFile(USAGE_CACHE_FILE, 'utf8');
-            return JSON.parse(content);
+            const data = JSON.parse(content);
+            if (data.timestamp) {
+                const age = Date.now() - new Date(data.timestamp).getTime();
+                if (age > CACHE_TTL_MS) {
+                    logger.info('[Usage Cache] Cache expired, ignoring stale data');
+                    return null;
+                }
+            }
+            return data;
         }
         return null;
     } catch (error) {
