@@ -1658,7 +1658,7 @@ async saveCredentialsToFile(filePath, newData) {
                 // but we must NOT use descriptive English phrases because the model
                 // will echo them verbatim back to the user as its own response.
                 currentContent = currentToolResults.length > 0
-                    ? 'Continue the original user task using the provided tool results. Do not ask what help is needed.'
+                    ? 'Continue'
                     : '.';
             }
 
