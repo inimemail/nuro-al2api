@@ -576,6 +576,61 @@ export function isAuthorized(req, requestUrl, REQUIRED_API_KEY) {
 }
 
 /**
+ * Generate an Anthropic-style request ID: "req_01" + 22 random base32 characters.
+ * Used to mimic real Claude API response headers.
+ */
+function generateAnthropicReqId() {
+    const base32Chars = 'ABCDEFGHJKMNPQRSTVWXYZ0123456789';
+    const randomBytes = crypto.randomBytes(22);
+    let id = 'req_01';
+    for (let i = 0; i < 22; i++) {
+        id += base32Chars[randomBytes[i] % base32Chars.length];
+    }
+    return id;
+}
+
+/**
+ * Build Anthropic-style response headers.
+ * Only applied when the client is using the Claude protocol (detected via req URL or headers).
+ */
+function buildAnthropicHeaders() {
+    const now = new Date();
+    const resetTime = new Date(now.getTime() + 60000); // reset in 60s
+    return {
+        'anthropic-ratelimit-requests-limit': '4000',
+        'anthropic-ratelimit-requests-remaining': '3999',
+        'anthropic-ratelimit-requests-reset': resetTime.toISOString(),
+        'anthropic-ratelimit-tokens-limit': '400000',
+        'anthropic-ratelimit-tokens-remaining': '399000',
+        'anthropic-ratelimit-tokens-reset': resetTime.toISOString(),
+        'anthropic-ratelimit-input-tokens-limit': '400000',
+        'anthropic-ratelimit-input-tokens-remaining': '399000',
+        'anthropic-ratelimit-input-tokens-reset': resetTime.toISOString(),
+        'anthropic-ratelimit-output-tokens-limit': '80000',
+        'anthropic-ratelimit-output-tokens-remaining': '79000',
+        'anthropic-ratelimit-output-tokens-reset': resetTime.toISOString(),
+        'request-id': generateAnthropicReqId(),
+        'anthropic-organization-id': 'fc9e7c32-1f4c-4a37-ac88-1ba9b6d3e7fb',
+    };
+}
+
+/**
+ * Detect whether the current response targets the Claude/Anthropic client protocol.
+ */
+function isAnthropicClient(res) {
+    try {
+        const req = res.req;
+        if (!req) return false;
+        const url = req.url || '';
+        if (url.startsWith('/v1/messages') || url.startsWith('/messages')) return true;
+        if (req.headers && (req.headers['x-api-key'] || req.headers['anthropic-version'])) return true;
+        return false;
+    } catch {
+        return false;
+    }
+}
+
+/**
  * Handles the common logic for sending API responses (unary and stream).
  * This includes writing response headers, logging conversation, and logging auth token expiry.
  * @param {http.ServerResponse} res - The HTTP response object.
@@ -584,19 +639,21 @@ export function isAuthorized(req, requestUrl, REQUIRED_API_KEY) {
  */
 export async function handleUnifiedResponse(res, responsePayload, isStream, statusCode = 200) {
     const validatedStatusCode = ensureValidStatusCode(statusCode);
+    const anthropicHeaders = isAnthropicClient(res) ? buildAnthropicHeaders() : {};
     if (isStream) {
         res.writeHead(200, {
             "Content-Type": "text/event-stream",
             "Cache-Control": "no-cache, no-transform",
             "Connection": "keep-alive",
             "Transfer-Encoding": "chunked",
-            "X-Accel-Buffering": "no"
+            "X-Accel-Buffering": "no",
+            ...anthropicHeaders
         });
         if (typeof res.flushHeaders === 'function') {
             res.flushHeaders();
         }
     } else {
-        res.writeHead(validatedStatusCode, { 'Content-Type': 'application/json' });
+        res.writeHead(validatedStatusCode, { 'Content-Type': 'application/json', ...anthropicHeaders });
     }
 
     if (isStream) {

@@ -53,6 +53,65 @@ const KIRO_MAX_TOOL_NAME_LENGTH = 64;
 let kiroThrottleQueue = Promise.resolve();
 let kiroLastRequestStartedAt = 0;
 
+// Lazy-loaded PDF parser - only loaded when needed to avoid startup overhead
+let _pdfParseModule = null;
+async function getPdfParser() {
+    if (_pdfParseModule === null) {
+        try {
+            const mod = await import('pdf-parse');
+            _pdfParseModule = mod.default || mod;
+        } catch (err) {
+            logger.warn(`[Kiro] pdf-parse module not available: ${err.message}`);
+            _pdfParseModule = false;
+        }
+    }
+    return _pdfParseModule || null;
+}
+
+/**
+ * Parse a base64-encoded PDF into plain text.
+ * Returns null on failure.
+ */
+async function parsePdfBase64ToText(base64Data) {
+    try {
+        const pdfParse = await getPdfParser();
+        if (!pdfParse) return null;
+        const buffer = Buffer.from(base64Data, 'base64');
+        const result = await pdfParse(buffer);
+        return result && typeof result.text === 'string' ? result.text : null;
+    } catch (err) {
+        logger.warn(`[Kiro] Failed to parse PDF: ${err.message}`);
+        return null;
+    }
+}
+
+/**
+ * Generate an Anthropic-style message ID: "msg_01" + 22 random base32 characters.
+ * Real Claude API responses use this format (e.g., "msg_01ABC123...").
+ */
+function generateAnthropicMessageId() {
+    const base32Chars = 'ABCDEFGHJKMNPQRSTVWXYZ0123456789'; // Crockford-style base32
+    const randomBytes = crypto.randomBytes(22);
+    let id = 'msg_01';
+    for (let i = 0; i < 22; i++) {
+        id += base32Chars[randomBytes[i] % base32Chars.length];
+    }
+    return id;
+}
+
+/**
+ * Generate an Anthropic-style request ID: "req_01" + 22 random base32 characters.
+ */
+function generateAnthropicRequestId() {
+    const base32Chars = 'ABCDEFGHJKMNPQRSTVWXYZ0123456789';
+    const randomBytes = crypto.randomBytes(22);
+    let id = 'req_01';
+    for (let i = 0; i < 22; i++) {
+        id += base32Chars[randomBytes[i] % base32Chars.length];
+    }
+    return id;
+}
+
 function shortenKiroToolName(name) {
     const rawName = String(name || '');
     if (rawName.length <= KIRO_MAX_TOOL_NAME_LENGTH) {
@@ -1039,6 +1098,50 @@ async saveCredentialsToFile(filePath, newData) {
         return null;
     }
 
+    /**
+     * Build a natural-language directive that emulates Anthropic's tool_choice parameter.
+     * CodeWhisperer has no native tool_choice, so we inject instructions the model will obey.
+     *
+     * Supported shapes (matching Anthropic's API):
+     *   - { type: "auto" }      → no instruction (default behavior)
+     *   - { type: "any" }       → force some tool call
+     *   - { type: "tool", name: "X" } → force specific tool
+     *   - { type: "none" }      → forbid tool calls
+     *   - "required" / "any"    → force some tool call (OpenAI-compat)
+     *   - "none"                → forbid tool calls
+     *   - "auto"                → no instruction
+     */
+    _buildToolChoiceInstruction(toolChoice, tools) {
+        if (!toolChoice) return '';
+        if (!Array.isArray(tools) || tools.length === 0) return '';
+
+        let type = '';
+        let forcedName = '';
+        if (typeof toolChoice === 'string') {
+            type = toolChoice.toLowerCase().trim();
+        } else if (typeof toolChoice === 'object') {
+            type = String(toolChoice.type || '').toLowerCase().trim();
+            forcedName = typeof toolChoice.name === 'string' ? toolChoice.name : '';
+        }
+
+        if (type === 'auto' || type === '') return '';
+
+        if (type === 'none') {
+            return '[Tool Usage Directive]\nYou MUST NOT call any tool in this turn. Respond with text only.';
+        }
+
+        if (type === 'tool' && forcedName) {
+            return `[Tool Usage Directive]\nYou MUST invoke the tool named "${forcedName}" to answer this request. Do not respond with plain text before the tool call. The tool call is mandatory.`;
+        }
+
+        if (type === 'any' || type === 'required') {
+            const availableNames = tools.map(t => t && t.name).filter(Boolean).join(', ');
+            return `[Tool Usage Directive]\nYou MUST invoke one of the available tools (${availableNames}) to answer this request. A tool call is mandatory; do not respond with plain text only.`;
+        }
+
+        return '';
+    }
+
     _hasThinkingPrefix(text) {
         if (!text) return false;
         return text.includes(KIRO_THINKING.MODE_TAG) || text.includes(KIRO_THINKING.MAX_LEN_TAG) || text.includes(KIRO_THINKING.EFFORT_TAG);
@@ -1106,7 +1209,7 @@ async saveCredentialsToFile(filePath, newData) {
     /**
      * Build CodeWhisperer request from OpenAI messages
      */
-    async buildCodewhispererRequest(messages, model, tools = null, inSystemPrompt = null, thinking = null) {
+    async buildCodewhispererRequest(messages, model, tools = null, inSystemPrompt = null, thinking = null, toolChoice = null) {
         const conversationId = uuidv4();
         
         let systemPrompt = this.getContentText(inSystemPrompt);
@@ -1179,6 +1282,16 @@ async saveCredentialsToFile(filePath, newData) {
         const toolNameMaps = buildKiroToolNameMaps(tools);
         const toolsContext = buildKiroToolsContext(tools, toolNameMaps);
 
+        // Apply tool_choice as an explicit instruction in the system prompt.
+        // CodeWhisperer doesn't have a native tool_choice parameter, so we inject
+        // natural-language directives that the model treats as binding.
+        const toolChoiceInstruction = this._buildToolChoiceInstruction(toolChoice, tools);
+        if (toolChoiceInstruction) {
+            systemPrompt = systemPrompt
+                ? `${systemPrompt}\n\n${toolChoiceInstruction}`
+                : toolChoiceInstruction;
+        }
+
         const history = [];
         let startIndex = 0;
 
@@ -1242,6 +1355,21 @@ async saveCredentialsToFile(filePath, newData) {
                                 status: 'success',
                                 toolUseId: part.tool_use_id
                             });
+                        } else if (part.type === 'document') {
+                            // Handle PDF / text documents by parsing to inline text
+                            const mediaType = part?.source?.media_type || '';
+                            if (mediaType === 'application/pdf' && part?.source?.type === 'base64' && part?.source?.data) {
+                                const pdfText = await parsePdfBase64ToText(part.source.data);
+                                if (pdfText) {
+                                    const label = part?.title ? `PDF Document: ${part.title}` : 'PDF Document';
+                                    userInputMessage.content += `\n\n[${label}]\n${pdfText}\n[End of Document]\n\n`;
+                                    logger.info(`[Kiro] Parsed PDF in history (${pdfText.length} chars)`);
+                                } else {
+                                    userInputMessage.content += `\n[PDF document could not be parsed]\n`;
+                                }
+                            } else if (part?.source?.type === 'text' && part?.source?.data) {
+                                userInputMessage.content += `\n\n[Document]\n${part.source.data}\n[End of Document]\n\n`;
+                            }
                         } else if (part.type === 'image') {
                             if (shouldKeepImages) {
                                 // 最近 5 条消息内的图片保留原始数据
@@ -1410,6 +1538,21 @@ async saveCredentialsToFile(filePath, newData) {
                             name: toolNameMaps.toKiroName(part.name),
                             toolUseId: part.id
                         });
+                    } else if (part.type === 'document') {
+                        // Handle PDF / text documents by parsing to inline text
+                        const mediaType = part?.source?.media_type || '';
+                        if (mediaType === 'application/pdf' && part?.source?.type === 'base64' && part?.source?.data) {
+                            const pdfText = await parsePdfBase64ToText(part.source.data);
+                            if (pdfText) {
+                                const label = part?.title ? `PDF Document: ${part.title}` : 'PDF Document';
+                                currentContent += `\n\n[${label}]\n${pdfText}\n[End of Document]\n\n`;
+                                logger.info(`[Kiro] Parsed PDF in current message (${pdfText.length} chars)`);
+                            } else {
+                                currentContent += `\n[PDF document could not be parsed]\n`;
+                            }
+                        } else if (part?.source?.type === 'text' && part?.source?.data) {
+                            currentContent += `\n\n[Document]\n${part.source.data}\n[End of Document]\n\n`;
+                        }
                     } else if (part.type === 'image') {
                         currentImages.push({
                             format: part.source.media_type.split('/')[1],
@@ -1425,7 +1568,10 @@ async saveCredentialsToFile(filePath, newData) {
 
             // Kiro API 要求 content 不能为空，即使有 toolResults
             if (!currentContent) {
-                currentContent = currentToolResults.length > 0 ? 'Tool results provided.' : 'Continue';
+                // Use a single dot — Kiro API requires non-empty content,
+                // but we must NOT use descriptive English phrases because the model
+                // will echo them verbatim back to the user as its own response.
+                currentContent = '.';
             }
 
             if (prependSystemToCurrentMessage) {
@@ -1434,11 +1580,9 @@ async saveCredentialsToFile(filePath, newData) {
                     : systemPrompt;
             }
 
-            // Apply code-context wrapper for non-code requests to bypass AWS intent classifier
-            if (this._shouldApplyCodeContextWrapper(currentContent, currentToolResults, toolsContext)) {
-                logger.info('[Kiro] Applying code-context wrapper to non-code request');
-                currentContent = `[Code Assistant Context]\n${currentContent}`;
-            }
+            // NOTE: [Code Assistant Context] wrapper removed — the model echoes it back
+            // to the user, which exposes the proxy. The wrapper was intended to bypass
+            // AWS intent classification but the leak is worse than the occasional block.
         }
 
         const request = {
@@ -1639,7 +1783,7 @@ async saveCredentialsToFile(filePath, newData) {
             throw new Error('No messages found in request body');
         }
 
-        const requestData = await this.buildCodewhispererRequest(messages, model, body.tools, body.system, body.thinking);
+        const requestData = await this.buildCodewhispererRequest(messages, model, body.tools, body.system, body.thinking, body.tool_choice);
 
         try {
             const token = this.accessToken; // Use the already initialized token
@@ -2039,15 +2183,22 @@ async saveCredentialsToFile(filePath, newData) {
                 }
                 break;
             } catch (error) {
-                logger.error('[Kiro] Error in generateContent:', error);
+         logger.error('[Kiro] Error in generateContent:', error);
                 throw error;
             }
         }
 
-        // If still empty after all retries, inject a fallback message
+        // If still empty after all retries, throw an Anthropic-style transient error
+        // so the client sees what looks like a real API hiccup (no leaked proxy text).
         if (responseText.trim() === '' && toolCalls.length === 0) {
-            logger.error(`[Kiro] Empty response persisted after ${maxEmptyRetries} retries. Injecting fallback message.`);
-            responseText = '[The model returned an empty response after multiple retries. This may be caused by content filtering from the upstream provider. Please try rephrasing your request with a code-related context.]';
+            logger.error(`[Kiro] Empty response persisted after ${maxEmptyRetries} retries. Throwing overloaded_error.`);
+            const err = new Error('Overloaded');
+            err.response = {
+                status: 529,
+                data: { type: 'error', error: { type: 'overloaded_error', message: 'Overloaded' } }
+            };
+            err.shouldSwitchCredential = true;
+            throw err;
         }
 
         const thinkingType = requestBody?.thinking?.type;
@@ -2211,7 +2362,7 @@ async saveCredentialsToFile(filePath, newData) {
             throw new Error('No messages found in request body');
         }
 
-        const requestData = await this.buildCodewhispererRequest(messages, model, body.tools, body.system, body.thinking);
+        const requestData = await this.buildCodewhispererRequest(messages, model, body.tools, body.system, body.thinking, body.tool_choice);
         const toolNameMaps = requestData._kiroToolNameMaps;
 
         const token = this.accessToken;
@@ -2405,7 +2556,7 @@ async saveCredentialsToFile(filePath, newData) {
 
         let inputTokens = 0;
         let contextUsagePercentage = null;
-        const messageId = `${uuidv4()}`;
+        const messageId = generateAnthropicMessageId();
 
         const thinkingType = requestBody?.thinking?.type;
         const thinkingRequested = typeof thinkingType === 'string' &&
@@ -2505,7 +2656,7 @@ async saveCredentialsToFile(filePath, newData) {
             let toolUseBlockIndexes = new Map(); // toolUseId -> content block index
 
             const estimatedInputTokens = this.estimateInputTokens(requestBody);
-            const maxEmptyRetries = Number(this.config.KIRO_EMPTY_RESPONSE_MAX_RETRIES) || 2;
+            const maxEmptyRetries = Number(this.config.KIRO_EMPTY_RESPONSE_MAX_RETRIES) || 1;
             let emptyRetryCount = 0;
 
             // 1. 先发送 message_start 事件 (only once, outside retry loop)
@@ -2892,10 +3043,14 @@ async saveCredentialsToFile(filePath, newData) {
                 totalContent.trim() === '';
 
             if (isStillEmpty) {
-                logger.error(`[Kiro Stream] Empty response persisted after ${maxEmptyRetries} retries. Injecting fallback message.`);
-                yield* pushEvents(createTextDeltaEvents(
-                    '[The model returned an empty response after multiple retries. This may be caused by content filtering from the upstream provider. Please try rephrasing your request with a code-related context.]'
-                ));
+                logger.error(`[Kiro Stream] Empty response persisted after ${maxEmptyRetries} retries. Emitting overloaded_error.`);
+                // Emit a proper Anthropic error event instead of user-visible fallback text.
+                // The client will see this as a transient API hiccup and may auto-retry.
+                yield* pushEvents([{
+                    type: 'error',
+                    error: { type: 'overloaded_error', message: 'Overloaded' }
+                }]);
+                return;  // Don't continue to the stop block — we already emitted error
             }
 
             const emittedOnlyThinking = thinkingRequested &&
@@ -2953,7 +3108,10 @@ async saveCredentialsToFile(filePath, newData) {
             // 4. 发送 message_delta 事件
             yield {
                 type: "message_delta",
-                delta: { stop_reason: toolCalls.length > 0 ? "tool_use" : (emittedOnlyThinking ? "max_tokens" : "end_turn") },
+                delta: {
+                    stop_reason: toolCalls.length > 0 ? "tool_use" : (emittedOnlyThinking ? "max_tokens" : "end_turn"),
+                    stop_sequence: null
+                },
                 usage: {
                     input_tokens: inputTokens,
                     output_tokens: outputTokens,
@@ -2989,7 +3147,7 @@ async saveCredentialsToFile(filePath, newData) {
      * Build Claude compatible response object
      */
     buildClaudeResponse(content, isStream = false, role = 'assistant', model, toolCalls = null, inputTokens = 0) {
-        const messageId = `${uuidv4()}`;
+        const messageId = generateAnthropicMessageId();
 
         if (isStream) {
             // Kiro API is "pseudo-streaming", so we'll send a few events to simulate
