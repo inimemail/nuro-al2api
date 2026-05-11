@@ -323,6 +323,23 @@ function resolveKiroModel(model) {
     return MODEL_MAPPING[model] || model;
 }
 
+function sanitizeKiroJsonSchema(schema) {
+    if (Array.isArray(schema)) {
+        return schema.map(item => sanitizeKiroJsonSchema(item));
+    }
+    if (!schema || typeof schema !== 'object') {
+        return schema;
+    }
+
+    const sanitized = {};
+    for (const [key, value] of Object.entries(schema)) {
+        if (key === 'additionalProperties') continue;
+        if (key === 'required' && Array.isArray(value) && value.length === 0) continue;
+        sanitized[key] = sanitizeKiroJsonSchema(value);
+    }
+    return sanitized;
+}
+
 function buildKiroToolsContext(tools, toolNameMaps) {
     if (!Array.isArray(tools) || tools.length === 0) {
         return {};
@@ -333,7 +350,7 @@ function buildKiroToolsContext(tools, toolNameMaps) {
             name: toolNameMaps.toKiroName(tool.name),
             description: tool.description || '',
             inputSchema: {
-                json: tool.input_schema || {}
+                json: sanitizeKiroJsonSchema(tool.input_schema || {})
             }
         }
     }));
@@ -1200,6 +1217,27 @@ async saveCredentialsToFile(filePath, newData) {
         return sanitized;
     }
 
+    _isEmptyToolInput(input) {
+        if (!input || typeof input !== 'object' || Array.isArray(input)) {
+            return false;
+        }
+        return Object.keys(this._sanitizeToolInput(input)).length === 0;
+    }
+
+    _isToolResultError(part) {
+        return part?.is_error === true || part?.status === 'error';
+    }
+
+    _buildKiroToolResult(part) {
+        const resultText = this.getContentText(part?.content);
+        const isError = this._isToolResultError(part);
+        return {
+            content: [{ text: isError ? `[Tool error]\n${resultText}` : resultText }],
+            status: isError ? 'error' : 'success',
+            toolUseId: part.tool_use_id
+        };
+    }
+
     _formatToolUseAsText(part) {
         const name = part?.name || 'unknown_tool';
         const id = part?.id ? ` ${part.id}` : '';
@@ -1484,6 +1522,8 @@ async saveCredentialsToFile(filePath, newData) {
 
         const history = [];
         let startIndex = 0;
+        const validToolUseIds = new Set();
+        const downgradedToolUseIds = new Set();
 
         let prependSystemToCurrentMessage = false;
 
@@ -1540,12 +1580,8 @@ async saveCredentialsToFile(filePath, newData) {
                         if (part.type === 'text') {
                             userInputMessage.content += part.text;
                         } else if (part.type === 'tool_result') {
-                            if (hasToolDefinitions) {
-                                toolResults.push({
-                                    content: [{ text: this.getContentText(part.content) }],
-                                    status: 'success',
-                                    toolUseId: part.tool_use_id
-                                });
+                            if (hasToolDefinitions && validToolUseIds.has(part.tool_use_id) && !downgradedToolUseIds.has(part.tool_use_id)) {
+                                toolResults.push(this._buildKiroToolResult(part));
                             } else {
                                 userInputMessage.content += this._formatToolResultAsText(part);
                             }
@@ -1630,11 +1666,17 @@ async saveCredentialsToFile(filePath, newData) {
                             thinkingText += (part.thinking ?? part.text ?? '');
                         } else if (part.type === 'tool_use') {
                             if (hasToolDefinitions) {
-                                toolUses.push({
-                                    input: this._sanitizeToolInput(part.input),
-                                    name: toolNameMaps.toKiroName(part.name),
-                                    toolUseId: part.id
-                                });
+                                if (this._isEmptyToolInput(part.input)) {
+                                    downgradedToolUseIds.add(part.id);
+                                    assistantResponseMessage.content += this._formatToolUseAsText(part);
+                                } else {
+                                    validToolUseIds.add(part.id);
+                                    toolUses.push({
+                                        input: this._sanitizeToolInput(part.input),
+                                        name: toolNameMaps.toKiroName(part.name),
+                                        toolUseId: part.id
+                                    });
+                                }
                             } else {
                                 assistantResponseMessage.content += this._formatToolUseAsText(part);
                             }
@@ -1685,11 +1727,17 @@ async saveCredentialsToFile(filePath, newData) {
                         thinkingText += (part.thinking ?? part.text ?? '');
                     } else if (part.type === 'tool_use') {
                         if (hasToolDefinitions) {
-                            assistantResponseMessage.toolUses.push({
-                                input: this._sanitizeToolInput(part.input),
-                                name: toolNameMaps.toKiroName(part.name),
-                                toolUseId: part.id
-                            });
+                            if (this._isEmptyToolInput(part.input)) {
+                                downgradedToolUseIds.add(part.id);
+                                assistantResponseMessage.content += this._formatToolUseAsText(part);
+                            } else {
+                                validToolUseIds.add(part.id);
+                                assistantResponseMessage.toolUses.push({
+                                    input: this._sanitizeToolInput(part.input),
+                                    name: toolNameMaps.toKiroName(part.name),
+                                    toolUseId: part.id
+                                });
+                            }
                         } else {
                             assistantResponseMessage.content += this._formatToolUseAsText(part);
                         }
@@ -1739,22 +1787,24 @@ async saveCredentialsToFile(filePath, newData) {
                     if (part.type === 'text') {
                         currentContent += part.text;
                     } else if (part.type === 'tool_result') {
-                        if (hasToolDefinitions) {
-                            currentToolResults.push({
-                                content: [{ text: this.getContentText(part.content) }],
-                                status: 'success',
-                                toolUseId: part.tool_use_id
-                            });
+                        if (hasToolDefinitions && validToolUseIds.has(part.tool_use_id) && !downgradedToolUseIds.has(part.tool_use_id)) {
+                            currentToolResults.push(this._buildKiroToolResult(part));
                         } else {
                             currentContent += this._formatToolResultAsText(part);
                         }
                     } else if (part.type === 'tool_use') {
                         if (hasToolDefinitions) {
-                            currentToolUses.push({
-                                input: this._sanitizeToolInput(part.input),
-                                name: toolNameMaps.toKiroName(part.name),
-                                toolUseId: part.id
-                            });
+                            if (this._isEmptyToolInput(part.input)) {
+                                downgradedToolUseIds.add(part.id);
+                                currentContent += this._formatToolUseAsText(part);
+                            } else {
+                                validToolUseIds.add(part.id);
+                                currentToolUses.push({
+                                    input: this._sanitizeToolInput(part.input),
+                                    name: toolNameMaps.toKiroName(part.name),
+                                    toolUseId: part.id
+                                });
+                            }
                         } else {
                             currentContent += this._formatToolUseAsText(part);
                         }
