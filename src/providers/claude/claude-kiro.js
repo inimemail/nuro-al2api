@@ -331,23 +331,6 @@ function isInvalidKiroModelError(error) {
     return false;
 }
 
-function sanitizeKiroJsonSchema(schema) {
-    if (Array.isArray(schema)) {
-        return schema.map(item => sanitizeKiroJsonSchema(item));
-    }
-    if (!schema || typeof schema !== 'object') {
-        return schema;
-    }
-
-    const sanitized = {};
-    for (const [key, value] of Object.entries(schema)) {
-        if (key === 'additionalProperties') continue;
-        if (key === 'required' && Array.isArray(value) && value.length === 0) continue;
-        sanitized[key] = sanitizeKiroJsonSchema(value);
-    }
-    return sanitized;
-}
-
 function buildKiroToolsContext(tools, toolNameMaps) {
     if (!Array.isArray(tools) || tools.length === 0) {
         return {};
@@ -358,7 +341,7 @@ function buildKiroToolsContext(tools, toolNameMaps) {
             name: toolNameMaps.toKiroName(tool.name),
             description: tool.description || '',
             inputSchema: {
-                json: sanitizeKiroJsonSchema(tool.input_schema || {})
+                json: tool.input_schema || {}
             }
         }
     }));
@@ -2130,12 +2113,18 @@ async saveCredentialsToFile(filePath, newData) {
                     pendingByToolUseId.get(targetId).function.arguments += input;
                 }
             } else if (ev.type === 'toolUseStop') {
-                for (let i = orderedToolUseIds.length - 1; i >= 0; i--) {
-                    const id = orderedToolUseIds[i];
-                    if (pendingByToolUseId.has(id)) {
-                        finalizeToolCall(id);
-                        break;
+                let targetId = ev.data?.toolUseId;
+                if (!targetId) {
+                    for (let i = orderedToolUseIds.length - 1; i >= 0; i--) {
+                        const id = orderedToolUseIds[i];
+                        if (pendingByToolUseId.has(id)) {
+                            targetId = id;
+                            break;
+                        }
                     }
+                }
+                if (targetId && pendingByToolUseId.has(targetId)) {
+                    finalizeToolCall(targetId);
                 }
             }
         }
@@ -2777,6 +2766,15 @@ async saveCredentialsToFile(filePath, newData) {
                             input: normalizeKiroToolInput(parsed.input)
                         }
                     });
+                    if (parsed.stop === true) {
+                        events.push({
+                            type: 'toolUseStop',
+                            data: {
+                                toolUseId: parsed.toolUseId,
+                                stop: true
+                            }
+                        });
+                    }
                 }
                 // 处理工具调用的结束事件：必须是 stop=true 的"纯结束"事件，
                 // 排除 {stop:false, contextUsagePercentage:...} 这类心跳、
@@ -2789,6 +2787,7 @@ async saveCredentialsToFile(filePath, newData) {
                     events.push({
                         type: 'toolUseStop',
                         data: {
+                            toolUseId: parsed.toolUseId,
                             stop: true
                         }
                     });
@@ -2921,9 +2920,17 @@ async saveCredentialsToFile(filePath, newData) {
                         };
                         yield { type: 'toolUse', toolUse };
                     } else if (event.type === 'toolUseInput') {
-                        yield { type: 'toolUseInput', input: event.data.input };
+                        yield {
+                            type: 'toolUseInput',
+                            toolUseId: event.data.toolUseId,
+                            input: event.data.input
+                        };
                     } else if (event.type === 'toolUseStop') {
-                        yield { type: 'toolUseStop', stop: event.data.stop };
+                        yield {
+                            type: 'toolUseStop',
+                            toolUseId: event.data.toolUseId,
+                            stop: event.data.stop
+                        };
                     } else if (event.type === 'contextUsage') {
                         yield { type: 'contextUsage', contextUsagePercentage: event.data.contextUsagePercentage };
                     }
@@ -3485,11 +3492,13 @@ async saveCredentialsToFile(filePath, newData) {
                 } else if (event.type === 'toolUseStop') {
                     // 工具结束：收尾最近一个未完成调用
                     if (event.stop) {
-                        let targetId = null;
-                        for (let i = pendingOrder.length - 1; i >= 0; i--) {
-                            if (pendingToolCalls.has(pendingOrder[i])) {
-                                targetId = pendingOrder[i];
-                                break;
+                        let targetId = event.toolUseId;
+                        if (!targetId) {
+                            for (let i = pendingOrder.length - 1; i >= 0; i--) {
+                                if (pendingToolCalls.has(pendingOrder[i])) {
+                                    targetId = pendingOrder[i];
+                                    break;
+                                }
                             }
                         }
                         if (targetId) {
