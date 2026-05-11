@@ -1357,6 +1357,57 @@ async saveCredentialsToFile(filePath, newData) {
         return Object.keys(this._sanitizeToolInput(input)).length === 0;
     }
 
+    _getToolInputValidationError(toolName, input, tools = []) {
+        const name = String(toolName || '').trim();
+        const lowerName = name.toLowerCase();
+        const normalizedInput = input && typeof input === 'object' && !Array.isArray(input)
+            ? this._sanitizeToolInput(input)
+            : {};
+
+        const tool = Array.isArray(tools)
+            ? tools.find(candidate => String(candidate?.name || '').toLowerCase() === lowerName)
+            : null;
+        const schema = tool?.input_schema || tool?.inputSchema || tool?.parameters || {};
+        const required = Array.isArray(schema?.required) ? schema.required : [];
+        const missing = required.filter(key => {
+            const value = normalizedInput[key];
+            return value === undefined || value === null || (typeof value === 'string' && value.trim() === '');
+        });
+        if (missing.length > 0) {
+            return `missing required parameter(s): ${missing.join(', ')}`;
+        }
+
+        if (/(bash|shell)/i.test(name)) {
+            const command = normalizedInput.command;
+            if (typeof command !== 'string' || command.trim() === '') {
+                return 'missing required parameter: command';
+            }
+        }
+
+        const isFileOrShellTool = /read|edit|write|bash|shell|grep|glob|list|ls|search|find/i.test(name);
+        if (isFileOrShellTool && Object.keys(normalizedInput).length === 0) {
+            return 'empty input for file/shell tool';
+        }
+
+        return null;
+    }
+
+    _filterInvalidGeneratedToolCalls(toolCalls, tools = []) {
+        if (!Array.isArray(toolCalls) || toolCalls.length === 0) return toolCalls;
+        return toolCalls.filter(tc => {
+            const name = tc.function?.name || tc.name || 'unknown_tool';
+            const input = tc.function?.arguments !== undefined
+                ? normalizeToolCallArguments(tc.function.arguments)
+                : normalizeToolCallArguments(tc.input || {});
+            const validationError = this._getToolInputValidationError(name, input, tools);
+            if (validationError) {
+                logger.warn(`[Kiro] Dropping invalid generated tool call '${name}': ${validationError}`);
+                return false;
+            }
+            return true;
+        });
+    }
+
     _isToolResultError(part) {
         return part?.is_error === true || part?.status === 'error';
     }
@@ -2128,6 +2179,10 @@ async saveCredentialsToFile(filePath, newData) {
             value: toolNameMaps,
             enumerable: false
         });
+        Object.defineProperty(request, '_kiroOriginalTools', {
+            value: tools || [],
+            enumerable: false
+        });
 
         // 监控钩子：内部请求转换
         const monitorRequestId = requestContext?._monitorRequestId;
@@ -2305,6 +2360,7 @@ async saveCredentialsToFile(filePath, newData) {
                 releaseThrottle();
             }
             response._kiroToolNameMaps = requestData._kiroToolNameMaps;
+            response._kiroOriginalTools = requestData._kiroOriginalTools || body.tools || [];
             return response;
         } catch (error) {
             const status = error.response?.status;
@@ -2621,8 +2677,12 @@ async saveCredentialsToFile(filePath, newData) {
             allToolCalls.push(...restoreKiroToolCallNames(rawBracketToolCalls, toolNameMaps));
         }
 
+        const validationTools = response?._kiroOriginalTools || response?._kiroTools || [];
         // 3. Deduplicate all collected tool calls
-        const uniqueToolCalls = deduplicateToolCalls(toOpenAIToolCalls(allToolCalls));
+        const uniqueToolCalls = this._filterInvalidGeneratedToolCalls(
+            deduplicateToolCalls(toOpenAIToolCalls(allToolCalls)),
+            validationTools
+        );
         //logger.info(`[Kiro] Total unique tool calls after deduplication: ${uniqueToolCalls.length}`);
 
         // 4. Clean up response text by removing all tool call syntax from the final text.
@@ -3283,9 +3343,8 @@ async saveCredentialsToFile(filePath, newData) {
             let toolCalls = [];
             let fatalStreamError = null;
             let currentToolCall = null; // 仅作"最近一次活跃调用"指针
-            let toolUseBlockIndexes = new Map(); // toolUseId -> content block index
             // 新：多工具并发/交错时的 map 累积，避免覆盖丢片段
-            let pendingToolCalls = new Map(); // toolUseId -> { toolUseId, name, input, blockIndex }
+            let pendingToolCalls = new Map(); // toolUseId -> { toolUseId, name, input }
             let pendingOrder = []; // 插入顺序，用于回落"最近未完成调用"
 
             // 收尾一个工具调用：解析 input JSON（失败时尝试 repairJson 一次），push 到 toolCalls，
@@ -3305,20 +3364,46 @@ async saveCredentialsToFile(filePath, newData) {
                         const diag = diagnoseJsonTruncation(p.input);
                         logger.warn(`[Kiro Stream] Tool '${p.name}' invalid input: ${diag || e2.message}`);
                         fatalStreamError = createToolCallTruncatedError(p, diag || e2.message);
-                        outEvents.push({ type: "content_block_stop", index: p.blockIndex });
                         outEvents.push(fatalStreamError);
-                        toolUseBlockIndexes.delete(toolUseId);
                         pendingToolCalls.delete(toolUseId);
                         return;
                     }
                 }
+                const validationError = this._getToolInputValidationError(p.name, parsedInput, requestBody.tools);
+                if (validationError) {
+                    logger.warn(`[Kiro Stream] Dropping invalid generated tool call '${p.name}': ${validationError}`);
+                    pendingToolCalls.delete(toolUseId);
+                    return;
+                }
+
+                const blockIndex = streamState.nextBlockIndex++;
+                const normalizedInputJson = JSON.stringify(parsedInput || {});
                 sink.push({
                     toolUseId: p.toolUseId,
                     name: p.name,
                     input: parsedInput
                 });
-                outEvents.push({ type: "content_block_stop", index: p.blockIndex });
-                toolUseBlockIndexes.delete(toolUseId);
+                totalContent += p.name || '';
+                totalContent += normalizedInputJson;
+                outEvents.push({
+                    type: "content_block_start",
+                    index: blockIndex,
+                    content_block: {
+                        type: "tool_use",
+                        id: p.toolUseId,
+                        name: p.name,
+                        input: {}
+                    }
+                });
+                outEvents.push({
+                    type: "content_block_delta",
+                    index: blockIndex,
+                    delta: {
+                        type: "input_json_delta",
+                        partial_json: normalizedInputJson
+                    }
+                });
+                outEvents.push({ type: "content_block_stop", index: blockIndex });
                 pendingToolCalls.delete(toolUseId);
             };
 
@@ -3353,7 +3438,6 @@ async saveCredentialsToFile(filePath, newData) {
                     toolCalls = [];
                     fatalStreamError = null;
                     currentToolCall = null;
-                    toolUseBlockIndexes = new Map();
                     pendingToolCalls = new Map();
                     pendingOrder = [];
                     contextUsagePercentage = null;
@@ -3504,9 +3588,6 @@ async saveCredentialsToFile(filePath, newData) {
                     const toolEvents = [];
 
                     // 统计工具调用的内容到 totalContent（用于 token 计算）
-                    if (tc.name) totalContent += tc.name;
-                    if (tc.input) totalContent += tc.input;
-
                     // 工具调用事件（包含 name 和 toolUseId）
                     if (tc.name && tc.toolUseId) {
                         // 遇到工具调用时，立即关闭文本块，避免前端等待到流结束才看到 content_block_stop
@@ -3516,42 +3597,17 @@ async saveCredentialsToFile(filePath, newData) {
                         // 把旧调用覆盖丢片段（read/edit 第一次失败的主因之一）。
                         let pending = pendingToolCalls.get(tc.toolUseId);
                         if (!pending) {
-                            const blockIndex = streamState.nextBlockIndex++;
-                            toolUseBlockIndexes.set(tc.toolUseId, blockIndex);
                             pending = {
                                 toolUseId: tc.toolUseId,
                                 name: tc.name,
-                                input: '',
-                                blockIndex
+                                input: ''
                             };
                             pendingToolCalls.set(tc.toolUseId, pending);
                             pendingOrder.push(tc.toolUseId);
 
-                            toolEvents.push({
-                                type: "content_block_start",
-                                index: blockIndex,
-                                content_block: {
-                                    type: "tool_use",
-                                    id: tc.toolUseId,
-                                    name: tc.name,
-                                    input: {}
-                                }
-                            });
                         }
                         pending.input += tc.input || '';
                         currentToolCall = pending;
-
-                        // 实时向前端推送工具参数增量
-                        if (tc.input) {
-                            toolEvents.push({
-                                type: "content_block_delta",
-                                index: pending.blockIndex,
-                                delta: {
-                                    type: "input_json_delta",
-                                    partial_json: tc.input
-                                }
-                            });
-                        }
 
                         // 本事件带 stop，立即收尾此工具块
                         if (tc.stop) {
@@ -3570,7 +3626,6 @@ async saveCredentialsToFile(filePath, newData) {
                     // input 续传：优先按 toolUseId 归属，缺失则落到最近一个未完成调用
                     const inputDelta = normalizeKiroToolInput(event.input);
                     if (!inputDelta) continue;
-                    totalContent += inputDelta;
 
                     let targetId = event.toolUseId;
                     if (!targetId) {
@@ -3585,14 +3640,6 @@ async saveCredentialsToFile(filePath, newData) {
                     if (pending) {
                         pending.input += inputDelta;
                         currentToolCall = pending;
-                        yield* pushEvents([{
-                            type: "content_block_delta",
-                            index: pending.blockIndex,
-                            delta: {
-                                type: "input_json_delta",
-                                partial_json: inputDelta
-                            }
-                        }]);
                     }
                 } else if (event.type === 'toolUseStop') {
                     // 工具结束：收尾最近一个未完成调用
@@ -3802,6 +3849,7 @@ async saveCredentialsToFile(filePath, newData) {
         // Use the original model name from the request, not the Kiro-mapped internal name
         const originalModel = requestBody?.model || model;
         const messageId = generateAnthropicMessageId();
+        const validToolCalls = this._filterInvalidGeneratedToolCalls(toolCalls || [], requestBody?.tools || []);
 
         if (isStream) {
             // Kiro API is "pseudo-streaming", so we'll send a few events to simulate
@@ -3829,7 +3877,7 @@ async saveCredentialsToFile(filePath, newData) {
 
             if (content) {
                 // If there are tool calls AND content, the content block index should be after tool calls
-                const contentBlockIndex = (toolCalls && toolCalls.length > 0) ? toolCalls.length : 0;
+                const contentBlockIndex = validToolCalls.length > 0 ? validToolCalls.length : 0;
 
                 // 2. content_block_start for text
                 events.push({
@@ -3857,13 +3905,13 @@ async saveCredentialsToFile(filePath, newData) {
                 totalOutputTokens += this.countTextTokens(content);
                 // If there are tool calls, the stop reason remains "tool_use".
                 // If only content, it's "end_turn".
-                if (!toolCalls || toolCalls.length === 0) {
+                if (validToolCalls.length === 0) {
                     stopReason = "end_turn";
                 }
             }
 
-            if (toolCalls && toolCalls.length > 0) {
-                toolCalls.forEach((tc, index) => {
+            if (validToolCalls.length > 0) {
+                validToolCalls.forEach((tc, index) => {
                     const inputObject = normalizeToolCallArguments(tc.function.arguments);
                     // 2. content_block_start for each tool_use
                     events.push({
@@ -3951,8 +3999,8 @@ async saveCredentialsToFile(filePath, newData) {
 
             // 2) Append tool_use blocks (if any).
             let stopReason = "end_turn";
-            if (toolCalls && toolCalls.length > 0) {
-                for (const tc of toolCalls) {
+            if (validToolCalls.length > 0) {
+                for (const tc of validToolCalls) {
                     const inputObject = normalizeToolCallArguments(tc.function.arguments);
                     contentArray.push({
                         type: "tool_use",
@@ -3965,7 +4013,7 @@ async saveCredentialsToFile(filePath, newData) {
                 stopReason = "tool_use"; // Set stop_reason to "tool_use" when toolCalls exist
             }
 
-            if (hasThinkingContent && !hasTextContent && (!toolCalls || toolCalls.length === 0)) {
+            if (hasThinkingContent && !hasTextContent && validToolCalls.length === 0) {
                 contentArray.push({ type: 'text', text: ' ' });
                 outputTokens += this.countTextTokens(' ');
                 stopReason = "max_tokens";
