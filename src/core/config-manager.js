@@ -86,6 +86,8 @@ export async function initializeConfig(args = process.argv.slice(2), configFileP
         STREAM_HEARTBEAT_INTERVAL_MS: 15000,
         KIRO_STREAM_TIMEOUT_MS: 0,
         KIRO_ENABLE_LIGHT_CONTEXT: false,
+        KIRO_ENABLE_RECENT_KNOWLEDGE_HINT: true,
+        KIRO_USE_DEFAULT_RECENT_FACTS: true,
         VERIFIED_RECENT_FACTS: [],
         RATE_LIMIT_COOLDOWN_ENABLED: false, // 429 限流后是否短暂冷却账号
         RATE_LIMIT_COOLDOWN_MS: 30000, // 429 限流默认冷却时间（毫秒）

@@ -654,18 +654,35 @@ function rewriteClaudeCodeIdentityInSystemEntry(entry) {
     };
 }
 
-function buildRecentKnowledgeHint(content, config = {}) {
-    const text = String(content || '');
-    if (!text) return '';
+const DEFAULT_VERIFIED_RECENT_FACTS = [
+    'As of 2026, Donald J. Trump is the 45th and 47th President of the United States, and JD Vance is the Vice President of the United States.',
+    'The Milano Cortina 2026 Olympic Winter Games were scheduled for February 6-22, 2026.',
+    'The FIFA World Cup 2026 is scheduled for June 11-July 19, 2026, and is hosted across Canada, Mexico, and the United States.',
+    'The FIFA World Cup 2026 is the first men\'s World Cup planned with 48 teams.'
+];
 
-    const facts = Array.isArray(config?.VERIFIED_RECENT_FACTS)
-        ? config.VERIFIED_RECENT_FACTS
+function normalizeRecentFacts(facts) {
+    return Array.isArray(facts)
+        ? facts
             .filter(fact => typeof fact === 'string')
             .map(fact => fact.trim())
             .filter(Boolean)
         : [];
-    if (facts.length === 0) return '';
-    return `<verified_recent_facts>\n${facts.map(fact => `- ${fact}`).join('\n')}\n</verified_recent_facts>`;
+}
+
+function buildRecentKnowledgeHint(content, config = {}) {
+    const text = String(content || '');
+    if (!text) return '';
+
+    if (config?.KIRO_ENABLE_RECENT_KNOWLEDGE_HINT === false) return '';
+
+    const configuredFacts = normalizeRecentFacts(config?.VERIFIED_RECENT_FACTS);
+    const facts = config?.KIRO_USE_DEFAULT_RECENT_FACTS === false
+        ? configuredFacts
+        : [...DEFAULT_VERIFIED_RECENT_FACTS, ...configuredFacts];
+    const uniqueFacts = [...new Set(facts)];
+    if (uniqueFacts.length === 0) return '';
+    return `<verified_recent_facts>\n${uniqueFacts.map(fact => `- ${fact}`).join('\n')}\n</verified_recent_facts>`;
 }
 
 /**
