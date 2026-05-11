@@ -28,7 +28,6 @@ const KIRO_THINKING = {
     END_TAG: '</thinking>',
     MODE_TAG: '<thinking_mode>',
     MAX_LEN_TAG: '<max_thinking_length>',
-    EFFORT_TAG: '<thinking_effort>',
 };
 
 const KIRO_CONSTANTS = {
@@ -165,6 +164,54 @@ function restoreKiroToolCallNames(toolCalls, toolNameMaps) {
             name: toolNameMaps.fromKiroName(toolCall.function?.name)
         }
     }));
+}
+
+function toOpenAIToolCall(toolCall) {
+    if (!toolCall) return null;
+    if (toolCall.function?.name !== undefined) return toolCall;
+
+    const id = toolCall.id || toolCall.toolUseId || `call_${uuidv4().replace(/-/g, '').substring(0, 8)}`;
+    let args = toolCall.input;
+    if (args === undefined || args === null) {
+        args = '{}';
+    } else if (typeof args !== 'string') {
+        try {
+            args = JSON.stringify(args);
+        } catch {
+            args = String(args);
+        }
+    }
+
+    return {
+        id,
+        type: 'function',
+        function: {
+            name: toolCall.name || toolCall.function?.name || 'unknown_tool',
+            arguments: args
+        }
+    };
+}
+
+function toOpenAIToolCalls(toolCalls) {
+    if (!Array.isArray(toolCalls)) return [];
+    return toolCalls.map(toOpenAIToolCall).filter(Boolean);
+}
+
+function normalizeToolCallForStream(toolCall) {
+    if (!toolCall) return null;
+    if (toolCall.toolUseId && toolCall.name !== undefined) {
+        return {
+            toolUseId: toolCall.toolUseId,
+            name: toolCall.name,
+            input: normalizeToolCallArguments(toolCall.input || {})
+        };
+    }
+
+    return {
+        toolUseId: toolCall.id || `tool_${uuidv4()}`,
+        name: toolCall.function?.name || toolCall.name || 'unknown_tool',
+        input: normalizeToolCallArguments(toolCall.function?.arguments || toolCall.input || '{}')
+    };
 }
 
 /**
@@ -314,12 +361,8 @@ const FULL_MODEL_MAPPING = {
     "claude-3-7-sonnet-20250219": "claude-sonnet-4.5"
 };
 
-// 只保留 KIRO_MODELS 中存在的模型映射
-// KIRO_MODELS is only the public/UI list; keep dated client aliases here too.
-const MODEL_MAPPING = FULL_MODEL_MAPPING;
-
 function resolveKiroModel(model) {
-    return MODEL_MAPPING[model] || model;
+    return FULL_MODEL_MAPPING[model] || model;
 }
 
 function isInvalidKiroModelError(error) {
@@ -466,6 +509,10 @@ function findRealThinkingEndTagAtBufferEnd(buffer, startIndex = 0) {
     }
 }
 
+function findRealThinkingEndTagBeforeText(buffer, startIndex = 0) {
+    return findRealTag(buffer, KIRO_THINKING.END_TAG, Math.max(0, startIndex));
+}
+
 /**
  * 通用的括号匹配函数 - 支持多种括号类型
  * @param {string} text - 要搜索的文本
@@ -583,24 +630,16 @@ function sanitizeProviderLeakInObject(value) {
     return copy;
 }
 
-function buildRecentKnowledgeHint(content, model) {
+function buildRecentKnowledgeHint(content, config = {}) {
     const text = String(content || '');
-    if (!text || !String(model || '').includes('opus-4-7')) return '';
+    if (!text) return '';
 
-    const facts = [];
-    if (/Trump[\s\S]{0,80}Putin[\s\S]{0,80}August\s+15,\s*2025|Putin[\s\S]{0,80}Trump[\s\S]{0,80}August\s+15,\s*2025/i.test(text)) {
-        facts.push('President Donald Trump met Russian President Vladimir Putin in Alaska on August 15, 2025.');
-    }
-    if (/25th[\s\S]{0,80}(SCO|Shanghai Cooperation Organization|Council of Heads of State)|August\s+31,\s*2025[\s\S]{0,80}(SCO|Shanghai Cooperation Organization)/i.test(text)) {
-        facts.push('The 25th Meeting of the Council of Heads of State of the Shanghai Cooperation Organization was hosted in Tianjin, China, from August 31 to September 1, 2025.');
-    }
-    if (/2025[\s\S]{0,40}Nobel Prize in Literature|Nobel Prize in Literature[\s\S]{0,40}2025/i.test(text)) {
-        facts.push('The 2025 Nobel Prize in Literature recipient was László Krasznahorkai.');
-    }
-    if (/OpenAI[\s\S]{0,80}(August\s+7,\s*2025|released)|August\s+7,\s*2025[\s\S]{0,80}OpenAI/i.test(text)) {
-        facts.push('OpenAI released GPT-5 on August 7, 2025.');
-    }
-
+    const facts = Array.isArray(config?.VERIFIED_RECENT_FACTS)
+        ? config.VERIFIED_RECENT_FACTS
+            .filter(fact => typeof fact === 'string')
+            .map(fact => fact.trim())
+            .filter(Boolean)
+        : [];
     if (facts.length === 0) return '';
     return `<verified_recent_facts>\n${facts.map(fact => `- ${fact}`).join('\n')}\n</verified_recent_facts>`;
 }
@@ -751,12 +790,14 @@ function deduplicateToolCalls(toolCalls) {
     const uniqueToolCalls = [];
 
     for (const tc of toolCalls) {
-        const key = `${tc.function.name}-${tc.function.arguments}`;
+        const name = tc.function?.name || tc.name || 'unknown_tool';
+        const args = tc.function?.arguments !== undefined ? tc.function.arguments : stringifyInput(tc.input || {});
+        const key = `${name}-${args}`;
         if (!seen.has(key)) {
             seen.add(key);
             uniqueToolCalls.push(tc);
         } else {
-            logger.info(`Skipping duplicate tool call: ${tc.function.name}`);
+            logger.info(`Skipping duplicate tool call: ${name}`);
         }
     }
     return uniqueToolCalls;
@@ -836,15 +877,6 @@ export class KiroApiService {
         this.useSystemProxy = config?.USE_SYSTEM_PROXY_KIRO ?? false;
         this.uuid = config?.uuid; // 获取多节点配置的 uuid
         logger.info(`[Kiro] System proxy ${this.useSystemProxy ? 'enabled' : 'disabled'}`);
-        // this.accessToken = config.KIRO_ACCESS_TOKEN;
-        // this.refreshToken = config.KIRO_REFRESH_TOKEN;
-        // this.clientId = config.KIRO_CLIENT_ID;
-        // this.clientSecret = config.KIRO_CLIENT_SECRET;
-        // this.authMethod = KIRO_CONSTANTS.AUTH_METHOD_SOCIAL;
-        // this.refreshUrl = KIRO_CONSTANTS.REFRESH_URL;
-        // this.refreshIDCUrl = KIRO_CONSTANTS.REFRESH_IDC_URL;
-        // this.baseUrl = KIRO_CONSTANTS.BASE_URL;
-
         // Add kiro-oauth-creds-base64 and kiro-oauth-creds-file to config
         if (config.KIRO_OAUTH_CREDS_BASE64) {
             try {
@@ -1424,7 +1456,7 @@ async saveCredentialsToFile(filePath, newData) {
 
     _hasThinkingPrefix(text) {
         if (!text) return false;
-        return text.includes(KIRO_THINKING.MODE_TAG) || text.includes(KIRO_THINKING.MAX_LEN_TAG) || text.includes(KIRO_THINKING.EFFORT_TAG);
+        return text.includes(KIRO_THINKING.MODE_TAG) || text.includes(KIRO_THINKING.MAX_LEN_TAG);
     }
 
     /**
@@ -1449,6 +1481,7 @@ async saveCredentialsToFile(filePath, newData) {
     }
 
     _shouldApplyLightKiroContext(content, toolResults, toolsContext, thinking, responseFormat) {
+        if (!this.config.KIRO_ENABLE_LIGHT_CONTEXT) return false;
         if (!this._shouldApplyCodeContextWrapper(content, toolResults, toolsContext)) return false;
         const thinkingType = typeof thinking?.type === 'string' ? thinking.type.toLowerCase() : '';
         const hasStructuredOutput = !!responseFormat;
@@ -1473,6 +1506,7 @@ async saveCredentialsToFile(filePath, newData) {
 
         let endPosInRest = findRealThinkingEndTag(rest);
         if (endPosInRest === -1) endPosInRest = findRealThinkingEndTagAtBufferEnd(rest);
+        if (endPosInRest === -1) endPosInRest = findRealThinkingEndTagBeforeText(rest);
 
         let thinking = '';
         let after = '';
@@ -1483,7 +1517,8 @@ async saveCredentialsToFile(filePath, newData) {
             after = rest.slice(endPosInRest + KIRO_THINKING.END_TAG.length);
         }
         
-        if (after.startsWith('\n\n')) after = after.slice(2);
+        if (after.startsWith('\r\n\r\n')) after = after.slice(4);
+        else if (after.startsWith('\n\n')) after = after.slice(2);
         if (isWhitespaceOnly(after)) after = '';
         
         const blocks = [];
@@ -1956,7 +1991,7 @@ async saveCredentialsToFile(filePath, newData) {
                     : responseFormatInstruction;
             }
 
-            const recentKnowledgeHint = buildRecentKnowledgeHint(currentContent, model);
+            const recentKnowledgeHint = buildRecentKnowledgeHint(currentContent, this.config);
             if (recentKnowledgeHint) {
                 currentContent = `${currentContent}\n\n${recentKnowledgeHint}`;
             }
@@ -2043,7 +2078,6 @@ async saveCredentialsToFile(filePath, newData) {
             }
         }
 
-        // fs.writeFile('claude-kiro-request'+Date.now()+'.json', JSON.stringify(request));
         return request;
     }
 
@@ -2206,7 +2240,7 @@ async saveCredentialsToFile(filePath, newData) {
         } catch (error) {
             const status = error.response?.status;
             const errorCode = error.code;
-            const errorMessage = error.message || '';
+            const errorMessage = sanitizeProviderLeakText(error.message || '');
             if (status === 400 && isInvalidKiroModelError(error)) {
                 logger.error(`[Kiro] Invalid model ID from upstream. requested=${model}, resolved=${resolveKiroModel(model)}`);
             }
@@ -2287,7 +2321,7 @@ async saveCredentialsToFile(filePath, newData) {
             }
 
             if (error.response && error.response.data) { logger.error('[Kiro] 400 Response body:', typeof error.response.data === 'string' ? error.response.data.substring(0, 500) : JSON.stringify(error.response.data).substring(0, 500)); }
-            logger.error(`[Kiro] API call failed (Status: ${status}, Code: ${errorCode}):`, error.message);
+            logger.error(`[Kiro] API call failed (Status: ${status}, Code: ${errorCode}):`, sanitizeProviderLeakText(error.message));
             throw error;
         }
     }
@@ -2295,18 +2329,18 @@ async saveCredentialsToFile(filePath, newData) {
     _getErrorResponseText(error) {
         const data = error?.response?.data;
         if (data === undefined || data === null) {
-            return error?.message || '';
+            return sanitizeProviderLeakText(error?.message || '');
         }
         if (Buffer.isBuffer(data)) {
-            return data.toString('utf8');
+            return sanitizeProviderLeakText(data.toString('utf8'));
         }
         if (typeof data === 'string') {
-            return data;
+            return sanitizeProviderLeakText(data);
         }
         try {
-            return JSON.stringify(data);
+            return sanitizeProviderLeakText(JSON.stringify(data));
         } catch {
-            return String(data);
+            return sanitizeProviderLeakText(String(data));
         }
     }
 
@@ -2512,14 +2546,14 @@ async saveCredentialsToFile(filePath, newData) {
         //logger.info(`[Kiro] Found ${allToolCalls.length} tool calls from event stream parsing.`);
 
         // 2. Crucial fix from Python example: Parse bracket tool calls from the original raw response
-        const rawBracketToolCalls = parseBracketToolCalls(rawResponseText);
+        const rawBracketToolCalls = allToolCalls.length > 0 ? null : parseBracketToolCalls(rawResponseText);
         if (rawBracketToolCalls) {
             //logger.info(`[Kiro] Found ${rawBracketToolCalls.length} bracket tool calls in raw response.`);
             allToolCalls.push(...restoreKiroToolCallNames(rawBracketToolCalls, toolNameMaps));
         }
 
         // 3. Deduplicate all collected tool calls
-        const uniqueToolCalls = deduplicateToolCalls(allToolCalls);
+        const uniqueToolCalls = deduplicateToolCalls(toOpenAIToolCalls(allToolCalls));
         //logger.info(`[Kiro] Total unique tool calls after deduplication: ${uniqueToolCalls.length}`);
 
         // 4. Clean up response text by removing all tool call syntax from the final text.
@@ -2536,7 +2570,6 @@ async saveCredentialsToFile(filePath, newData) {
         }
         
         // 5. Final content cleanup: convert escaped newlines to literal newlines
-        fullResponseText = fullResponseText.replace(/(?<!\\)\\n/g, '\n');
         fullResponseText = sanitizeProviderLeakText(fullResponseText);
         
         //logger.info(`[Kiro] Final response text after tool call cleanup: ${fullResponseText}`);
@@ -2570,6 +2603,17 @@ async saveCredentialsToFile(filePath, newData) {
         // thinking.display is not a standard field — remove it to avoid errors
         if (requestBody.thinking && requestBody.thinking.display !== undefined) {
             delete requestBody.thinking.display;
+        }
+
+        if (Array.isArray(requestBody.messages)) {
+            for (const message of requestBody.messages) {
+                if (!Array.isArray(message?.content)) continue;
+                for (const block of message.content) {
+                    if (block?.type === 'thinking' && Object.prototype.hasOwnProperty.call(block, 'signature')) {
+                        delete block.signature;
+                    }
+                }
+            }
         }
 
         if (requestBody.thinking?.type && typeof requestBody.thinking.type === 'string') {
@@ -2739,10 +2783,8 @@ async saveCredentialsToFile(filePath, newData) {
                 const parsed = JSON.parse(jsonStr);
                 // 处理 content 事件
                 if (parsed.content !== undefined && !parsed.followupPrompt) {
-                    // 处理转义字符
+                    // JSON.parse already decoded provider string escapes.
                     let decodedContent = parsed.content;
-                    // 无须处理转义的换行符，原来要处理是因为智能体返回的 content 需要通过换行符切割不同的json
-                    // decodedContent = decodedContent.replace(/(?<!\\)\\n/g, '\n');
                     events.push({ type: 'content', data: decodedContent });
                 }
                 // 处理结构化工具调用事件 - 开始事件（包含 name 和 toolUseId）
@@ -2953,7 +2995,7 @@ async saveCredentialsToFile(filePath, newData) {
             
             const status = error.response?.status;
             const errorCode = error.code;
-            const errorMessage = error.message || '';
+            const errorMessage = sanitizeProviderLeakText(error.message || '');
             if (status === 400 && isInvalidKiroModelError(error)) {
                 logger.error(`[Kiro] Invalid model ID from upstream in stream. requested=${model}, resolved=${resolveKiroModel(model)}`);
             }
@@ -3033,7 +3075,7 @@ async saveCredentialsToFile(filePath, newData) {
                 return;
             }
 
-            logger.error(`[Kiro] Stream API call failed (Status: ${status}, Code: ${errorCode}):`,  error.message);
+            logger.error(`[Kiro] Stream API call failed (Status: ${status}, Code: ${errorCode}):`,  sanitizeProviderLeakText(error.message));
             throw error;
         } finally {
             releaseThrottle();
@@ -3141,8 +3183,8 @@ async saveCredentialsToFile(filePath, newData) {
             }
             const events = [];
             events.push(...ensureBlockStart('text'));
-            // 将转义的换行符转换为真实换行符，确保流式输出显示正常
-            const decodedText = sanitizeProviderLeakText(text.replace(/(?<!\\)\\n/g, '\n'));
+            // Event parsing already decoded string escapes; do not rewrite literal "\n" text.
+            const decodedText = sanitizeProviderLeakText(text);
             events.push({
                 type: "content_block_delta",
                 index: streamState.textBlockIndex,
@@ -3157,8 +3199,8 @@ async saveCredentialsToFile(filePath, newData) {
             }
             const events = [];
             events.push(...ensureBlockStart('thinking'));
-            // 将转义的换行符转换为真实换行符
-            const decodedThinking = thinking.replace(/(?<!\\)\\n/g, '\n');
+            // Event parsing already decoded string escapes; do not rewrite literal "\n" text.
+            const decodedThinking = thinking;
             events.push({
                 type: "content_block_delta",
                 index: streamState.thinkingBlockIndex,
@@ -3347,6 +3389,7 @@ async saveCredentialsToFile(filePath, newData) {
 
                             let endPos = findRealThinkingEndTag(streamState.buffer);
                             if (endPos === -1) endPos = findRealThinkingEndTagAtBufferEnd(streamState.buffer);
+                            if (endPos === -1) endPos = findRealThinkingEndTagBeforeText(streamState.buffer);
                             if (endPos !== -1) {
                                 const thinkingPart = streamState.buffer.slice(0, endPos);
                                 if (thinkingPart) events.push(...createThinkingDeltaEvents(thinkingPart));
@@ -3615,11 +3658,8 @@ async saveCredentialsToFile(filePath, newData) {
             const bracketToolCalls = parseBracketToolCalls(totalContent);
             if (bracketToolCalls && bracketToolCalls.length > 0) {
                 for (const btc of bracketToolCalls) {
-                    toolCalls.push({
-                        toolUseId: btc.id || `tool_${uuidv4()}`,
-                        name: btc.function.name,
-                        input: normalizeToolCallArguments(btc.function.arguments || '{}')
-                    });
+                    const streamToolCall = normalizeToolCallForStream(btc);
+                    if (streamToolCall) toolCalls.push(streamToolCall);
                 }
             }
 
@@ -3635,7 +3675,10 @@ async saveCredentialsToFile(filePath, newData) {
             outputTokens = this.countTextTokens(plainForCount);
 
             for (const tc of toolCalls) {
-                outputTokens += this.countTextTokens(JSON.stringify(tc.input || {}));
+                const input = tc.input !== undefined
+                    ? tc.input
+                    : normalizeToolCallArguments(tc.function?.arguments || '{}');
+                outputTokens += this.countTextTokens(JSON.stringify(input || {}));
             }
 
             // 计算 input tokens

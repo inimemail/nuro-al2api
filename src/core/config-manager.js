@@ -85,6 +85,8 @@ export async function initializeConfig(args = process.argv.slice(2), configFileP
         CREDENTIAL_SWITCH_MAX_RETRIES: 5, // 坏凭证切换最大重试次数（用于认证错误后切换凭证）
         STREAM_HEARTBEAT_INTERVAL_MS: 15000,
         KIRO_STREAM_TIMEOUT_MS: 0,
+        KIRO_ENABLE_LIGHT_CONTEXT: false,
+        VERIFIED_RECENT_FACTS: [],
         RATE_LIMIT_COOLDOWN_ENABLED: false, // 429 限流后是否短暂冷却账号
         RATE_LIMIT_COOLDOWN_MS: 30000, // 429 限流默认冷却时间（毫秒）
         RATE_LIMIT_COOLDOWN_JITTER_MS: 5000, // 429 限流冷却随机抖动（毫秒）
