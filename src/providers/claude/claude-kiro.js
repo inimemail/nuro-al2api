@@ -315,9 +315,8 @@ const FULL_MODEL_MAPPING = {
 };
 
 // 只保留 KIRO_MODELS 中存在的模型映射
-const MODEL_MAPPING = Object.fromEntries(
-    Object.entries(FULL_MODEL_MAPPING).filter(([key]) => KIRO_MODELS.includes(key))
-);
+// KIRO_MODELS is only the public/UI list; keep dated client aliases here too.
+const MODEL_MAPPING = FULL_MODEL_MAPPING;
 
 function resolveKiroModel(model) {
     return MODEL_MAPPING[model] || model;
