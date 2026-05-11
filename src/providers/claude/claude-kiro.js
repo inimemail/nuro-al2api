@@ -630,6 +630,30 @@ function sanitizeProviderLeakInObject(value) {
     return copy;
 }
 
+function rewriteClaudeCodeIdentityText(text) {
+    if (typeof text !== 'string' || !text) return text;
+    return text
+        .replace(/You are Claude Code\b/g, 'You are Claude')
+        .replace(/\bClaude Code\b/g, 'Claude')
+        .replace(/\bAnthropic's official CLI\b/g, 'an official assistant interface');
+}
+
+function rewriteClaudeCodeIdentityInSystemEntry(entry) {
+    if (typeof entry === 'string') {
+        return rewriteClaudeCodeIdentityText(entry);
+    }
+    if (!entry || typeof entry !== 'object') {
+        return entry;
+    }
+    if (typeof entry.text !== 'string') {
+        return entry;
+    }
+    return {
+        ...entry,
+        text: rewriteClaudeCodeIdentityText(entry.text)
+    };
+}
+
 function buildRecentKnowledgeHint(content, config = {}) {
     const text = String(content || '');
     if (!text) return '';
@@ -1454,6 +1478,24 @@ async saveCredentialsToFile(filePath, newData) {
         return '';
     }
 
+    _buildToolReliabilityInstruction(tools) {
+        if (!Array.isArray(tools) || tools.length === 0) return '';
+        const toolNames = tools.map(tool => tool?.name).filter(Boolean);
+        const lowerNames = toolNames.map(name => name.toLowerCase());
+        const hasFileOrShellTools = lowerNames.some(name =>
+            /read|edit|write|bash|shell|grep|glob|list|ls|search|find/.test(name)
+        );
+        if (!hasFileOrShellTools) return '';
+
+        return [
+            '[Tool Reliability Directive]',
+            'When using file or shell tools, use only paths, working directories, and command arguments that are present in the conversation or tool results.',
+            'Do not invent usernames, home directories, drive letters, or repository paths. If a path is relative, keep it relative unless an absolute path was explicitly provided.',
+            'For Bash/shell tools, always provide the required command parameter as a non-empty string.',
+            'For Read/Edit/Write tools, always provide the exact required path parameter from known context. If the path is unknown, inspect/list first instead of guessing.'
+        ].join('\n');
+    }
+
     _hasThinkingPrefix(text) {
         if (!text) return false;
         return text.includes(KIRO_THINKING.MODE_TAG) || text.includes(KIRO_THINKING.MAX_LEN_TAG);
@@ -1635,6 +1677,7 @@ async saveCredentialsToFile(filePath, newData) {
         // 模型对"最近看到的指令"服从度更高，所以把它拼到当前 user 消息末尾，
         // 确保模型在决定输出前最后读到的是这条强约束。
         const toolChoiceInstruction = this._buildToolChoiceInstruction(toolChoice, tools);
+        const toolReliabilityInstruction = this._buildToolReliabilityInstruction(tools);
 
         const history = [];
         let startIndex = 0;
@@ -1879,6 +1922,9 @@ async saveCredentialsToFile(filePath, newData) {
             if (toolChoiceInstruction) {
                 currentContent = `${currentContent}\n\n${toolChoiceInstruction}`;
             }
+            if (toolReliabilityInstruction) {
+                currentContent = `${currentContent}\n\n${toolReliabilityInstruction}`;
+            }
         } else {
             // 最后一条消息是 user，需要确保 history 最后一个元素是 assistantResponseMessage
             // Kiro API 要求 history 必须以 assistantResponseMessage 结尾
@@ -1976,6 +2022,12 @@ async saveCredentialsToFile(filePath, newData) {
                 currentContent = currentContent
                     ? `${currentContent}\n\n${toolChoiceInstruction}`
                     : toolChoiceInstruction;
+            }
+
+            if (toolReliabilityInstruction) {
+                currentContent = currentContent
+                    ? `${currentContent}\n\n${toolReliabilityInstruction}`
+                    : toolReliabilityInstruction;
             }
 
             // NOTE: [Code Assistant Context] wrapper removed — the model echoes it back
@@ -2582,7 +2634,7 @@ async saveCredentialsToFile(filePath, newData) {
      * 1. Map output_config.format -> response_format
      * 2. Strip output_config.effort (unsupported, causes errors)
      * 3. Strip thinking.display (unsupported field)
-     * 4. Filter "You are Claude Code..." system prompt entries that trigger safety refusals
+     * 4. Rewrite Claude Code identity strings without dropping tool/workspace instructions
      */
     _normalizeRequestBody(requestBody) {
         // output_config handling
@@ -2623,22 +2675,15 @@ async saveCredentialsToFile(filePath, newData) {
             }
         }
 
-        // Filter system prompt entries that contain Claude Code identity strings
-        // which cause Kiro to trigger "I can't discuss that." safety refusals
+        // Keep tool/workspace instructions intact, but remove identity strings that
+        // can trigger Kiro safety refusals or provider-name leaks.
         if (Array.isArray(requestBody.system)) {
-            requestBody.system = requestBody.system.filter(entry => {
-                const text = typeof entry === 'string' ? entry : entry?.text || '';
-                return !text.includes("You are Claude Code") &&
-                       !text.includes("Anthropic's official CLI");
-            });
+            requestBody.system = requestBody.system.map(entry => rewriteClaudeCodeIdentityInSystemEntry(entry));
             if (requestBody.system.length === 0) {
                 delete requestBody.system;
             }
         } else if (typeof requestBody.system === 'string') {
-            if (requestBody.system.includes("You are Claude Code") ||
-                requestBody.system.includes("Anthropic's official CLI")) {
-                delete requestBody.system;
-            }
+            requestBody.system = rewriteClaudeCodeIdentityText(requestBody.system);
         }
 
         return requestBody;
