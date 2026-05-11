@@ -1,4 +1,4 @@
-import { atomicWriteFile } from '../../utils/file-lock.js';
+import { atomicWriteFile, withFileLock } from '../../utils/file-lock.js';
 import axios from 'axios';
 import logger from '../../utils/logger.js';
 import { v4 as uuidv4 } from 'uuid';
@@ -385,11 +385,11 @@ function generateMachineIdFromConfig(credentials) {
  * Mimics a real Kiro IDE (Electron-based) rather than a raw Node.js process.
  * @returns {Object} osName and electronVersion for UA construction
  */
-function getSystemRuntimeInfo() {
+function getSystemRuntimeInfo(config = {}) {
     const osPlatform = os.platform();
     const osRelease = os.release();
     // Kiro IDE runs on Electron — report Electron version, not Node.js
-    const electronVersion = process.env.KIRO_ELECTRON_VERSION || '33.4.0';
+    const electronVersion = config.KIRO_ELECTRON_VERSION || process.env.KIRO_ELECTRON_VERSION || '33.4.0';
 
     // Kiro IDE's Electron reports a simplified OS version.
     // Real Electron os.release() on Windows gives major.minor.build but Kiro UA
@@ -576,9 +576,8 @@ function normalizeResponseFormat(format) {
 function sanitizeProviderLeakText(text) {
     if (typeof text !== 'string' || !text) return text;
     return text
-        .replace(/\bKiroIDE\b/gi, 'Claude')
-        .replace(/\bKiro\b/gi, 'Claude')
-        .replace(/\bkiro\b/g, 'Claude');
+        .replace(/\bKiroIDE(?:-[A-Za-z0-9._-]+)*\b/g, 'Claude')
+        .replace(/\bKiro\s+(API|service|provider|gateway|client|IDE|backend|upstream|transport|routing layer)\b/gi, 'Claude $1');
 }
 
 function sanitizeProviderLeakInObject(value) {
@@ -659,7 +658,7 @@ function extractCredentialsFromCorruptedJson(content) {
  * @returns {Object|null} 解析后的工具调用对象或 null
  */
 function parseSingleToolCall(toolCallText) {
-    const namePattern = /\[Called\s+(\w+)\s+with\s+args:/i;
+    const namePattern = /\[Called\s+([^\s\]]+)\s+with\s+args:/i;
     const nameMatch = toolCallText.match(namePattern);
 
     if (!nameMatch) {
@@ -772,6 +771,71 @@ function deduplicateToolCalls(toolCalls) {
     return uniqueToolCalls;
 }
 
+function normalizeToolCallArguments(args) {
+    if (args === undefined || args === null) {
+        return {};
+    }
+
+    let inputObject;
+    try {
+        inputObject = typeof args === 'string' ? JSON.parse(args) : args;
+    } catch (e) {
+        logger.warn(`[Kiro] Invalid JSON for tool call arguments. Wrapping in raw_arguments. Error: ${e.message}`, args);
+        inputObject = { raw_arguments: args };
+    }
+
+    if (inputObject && typeof inputObject === 'object' && !Array.isArray(inputObject)) {
+        const keys = Object.keys(inputObject);
+        if (keys.length === 1 && Object.prototype.hasOwnProperty.call(inputObject, 'raw_arguments')) {
+            const rawArguments = inputObject.raw_arguments;
+            if (typeof rawArguments === 'string') {
+                try {
+                    const parsedRaw = JSON.parse(rawArguments);
+                    if (parsedRaw && typeof parsedRaw === 'object' && !Array.isArray(parsedRaw)) {
+                        return parsedRaw;
+                    }
+                } catch {
+                    return { raw_arguments: rawArguments };
+                }
+            } else if (rawArguments && typeof rawArguments === 'object' && !Array.isArray(rawArguments)) {
+                return rawArguments;
+            }
+        }
+    }
+
+    return inputObject && typeof inputObject === 'object' && !Array.isArray(inputObject)
+        ? inputObject
+        : { raw_arguments: inputObject };
+}
+
+function getKiroRequestUrl(model, baseUrl) {
+    if (String(model || '').startsWith('amazonq')) {
+        logger.warn('[Kiro] amazonq model requested but no Amazon Q endpoint is configured; falling back to Kiro baseUrl.');
+    }
+    return baseUrl;
+}
+
+function isToolHeavyRequest(messages, tools) {
+    if (!Array.isArray(tools) || tools.length === 0) return false;
+    const toolNames = tools
+        .map(tool => String(tool?.name || '').toLowerCase())
+        .join(' ');
+    if (/(read|grep|glob|list|ls|cat|search|find|bash|shell)/.test(toolNames)) {
+        return true;
+    }
+
+    const recentText = Array.isArray(messages)
+        ? messages.slice(-3).map(message => {
+            if (typeof message?.content === 'string') return message.content;
+            if (Array.isArray(message?.content)) {
+                return message.content.map(part => part?.text || part?.content || '').join(' ');
+            }
+            return '';
+        }).join(' ').toLowerCase()
+        : '';
+    return /(read file|读取|grep|search|查找|list files|列出|run command|执行命令)/.test(recentText);
+}
+
 export class KiroApiService {
     constructor(config = {}) {
         this.isInitialized = false;
@@ -823,8 +887,8 @@ export class KiroApiService {
             profileArn: this.profileArn,
             clientId: this.clientId
         });
-        const kiroVersion = KIRO_CONSTANTS.KIRO_VERSION;
-        const { osName, nodeVersion } = getSystemRuntimeInfo();
+        const kiroVersion = this.config.KIRO_VERSION || KIRO_CONSTANTS.KIRO_VERSION;
+        const { osName, nodeVersion } = getSystemRuntimeInfo(this.config);
 
         // 配置 HTTP/HTTPS agent：开启 keep-alive，保留更多空闲连接以复用 TLS 握手。
         // maxFreeSockets 默认 5 太低，会频繁释放热连接导致下次请求重新握手（多几百 ms）。
@@ -961,15 +1025,18 @@ async loadCredentials() {
                 logger.info(`[Kiro Auth] Successfully loaded OAuth credentials from ${targetFilePath}`);
             }
 
-            const files = await fs.readdir(dirPath);
+            const files = (await fs.readdir(dirPath)).sort((a, b) => a.localeCompare(b));
             for (const file of files) {
                 if (file.endsWith('.json') && file !== targetFileName) {
                     const filePath = path.join(dirPath, file);
                     const credentials = await loadCredentialsFromFile(filePath);
                     if (credentials) {
-                        credentials.expiresAt = mergedCredentials.expiresAt;
-                        Object.assign(mergedCredentials, credentials);
-                        logger.debug(`[Kiro Auth] Loaded Client credentials from ${file}`);
+                        for (const field of ['clientId', 'clientSecret', 'region', 'idcRegion', 'profileArn', 'startUrl']) {
+                            if (mergedCredentials[field] === undefined && credentials[field] !== undefined) {
+                                mergedCredentials[field] = credentials[field];
+                            }
+                        }
+                        logger.debug(`[Kiro Auth] Loaded supplemental client credentials from ${file}`);
                     }
                 }
             }
@@ -1040,38 +1107,40 @@ async initializeAuth(forceRefresh = false) {
  * Helper to save credentials
  */
 async saveCredentialsToFile(filePath, newData) {
-    let existingData = {};
-    try {
-        const fileContent = await fs.readFile(filePath, 'utf8');
+    await withFileLock(filePath, async () => {
+        let existingData = {};
         try {
-            existingData = JSON.parse(fileContent);
-        } catch (parseError) {
-            logger.warn('[Kiro Auth] JSON parse failed, attempting repair...');
+            const fileContent = await fs.readFile(filePath, 'utf8');
             try {
-                const repaired = repairJson(fileContent);
-                existingData = JSON.parse(repaired);
-                logger.info('[Kiro Auth] JSON repair successful');
-            } catch (repairError) {
-                logger.warn('[Kiro Auth] JSON repair failed, attempting field extraction...');
-                const extracted = extractCredentialsFromCorruptedJson(fileContent);
-                if (extracted) {
-                    existingData = extracted;
-                    logger.info('[Kiro Auth] Field extraction successful');
-                } else {
-                    logger.error('[Kiro Auth] All recovery methods failed:', repairError.message);
-                    existingData = {};
+                existingData = JSON.parse(fileContent);
+            } catch (parseError) {
+                logger.warn('[Kiro Auth] JSON parse failed, attempting repair...');
+                try {
+                    const repaired = repairJson(fileContent);
+                    existingData = JSON.parse(repaired);
+                    logger.info('[Kiro Auth] JSON repair successful');
+                } catch (repairError) {
+                    logger.warn('[Kiro Auth] JSON repair failed, attempting field extraction...');
+                    const extracted = extractCredentialsFromCorruptedJson(fileContent);
+                    if (extracted) {
+                        existingData = extracted;
+                        logger.info('[Kiro Auth] Field extraction successful');
+                    } else {
+                        logger.error('[Kiro Auth] All recovery methods failed:', repairError.message);
+                        existingData = {};
+                    }
                 }
             }
+        } catch (readError) {
+            if (readError.code === 'ENOENT') {
+                logger.debug(`[Kiro Auth] Token file not found, creating new one: ${filePath}`);
+            } else {
+                logger.warn(`[Kiro Auth] Could not read existing token file ${filePath}: ${readError.message}`);
+            }
         }
-    } catch (readError) {
-        if (readError.code === 'ENOENT') {
-            logger.debug(`[Kiro Auth] Token file not found, creating new one: ${filePath}`);
-        } else {
-            logger.warn(`[Kiro Auth] Could not read existing token file ${filePath}: ${readError.message}`);
-        }
-    }
-    const mergedData = { ...existingData, ...newData };
-    await atomicWriteFile(filePath, JSON.stringify(mergedData, null, 2), { encoding: 'utf8', mode: 0o600 });
+        const mergedData = { ...existingData, ...newData };
+        await atomicWriteFile(filePath, JSON.stringify(mergedData, null, 2), { encoding: 'utf8', mode: 0o600 });
+    });
     logger.info(`[Kiro Auth] Updated token file: ${filePath}`);
 };
 
@@ -1278,6 +1347,7 @@ async saveCredentialsToFile(filePath, newData) {
     _generateThinkingPrefix(thinking) {
         if (!thinking || typeof thinking !== 'object') return null;
         const type = String(thinking.type || '').toLowerCase().trim();
+        if (type === 'disabled' || type === 'off') return null;
 
         if (type === 'enabled') {
             const budget = this._normalizeThinkingBudgetTokens(thinking.budget_tokens);
@@ -1296,6 +1366,25 @@ async saveCredentialsToFile(filePath, newData) {
         }
 
         return null;
+    }
+
+    _getEffectiveThinking(messages, tools, thinking) {
+        const type = String(thinking?.type || '').toLowerCase().trim();
+        if ((type === 'enabled' || type === 'adaptive') && isToolHeavyRequest(messages, tools)) {
+            logger.info('[Kiro] Disabling thinking for tool-heavy deterministic request.');
+            return { type: 'disabled' };
+        }
+        return thinking;
+    }
+
+    _applyEffectiveThinkingToRequestBody(requestBody) {
+        if (!requestBody?.thinking) return;
+        const effectiveThinking = this._getEffectiveThinking(requestBody.messages, requestBody.tools, requestBody.thinking);
+        if (effectiveThinking?.type === 'disabled') {
+            delete requestBody.thinking;
+        } else {
+            requestBody.thinking = effectiveThinking;
+        }
     }
 
     /**
@@ -1416,7 +1505,7 @@ async saveCredentialsToFile(filePath, newData) {
     /**
      * Build CodeWhisperer request from OpenAI messages
      */
-    async buildCodewhispererRequest(messages, model, tools = null, inSystemPrompt = null, thinking = null, toolChoice = null, responseFormat = null) {
+    async buildCodewhispererRequest(messages, model, tools = null, inSystemPrompt = null, thinking = null, toolChoice = null, responseFormat = null, requestContext = {}) {
         const conversationId = uuidv4();
 
         let systemPrompt = this.getContentText(inSystemPrompt);
@@ -1454,7 +1543,8 @@ async saveCredentialsToFile(filePath, newData) {
             throw new Error('No user messages found');
         }
 
-        const thinkingPrefix = this._generateThinkingPrefix(thinking);
+        const effectiveThinking = this._getEffectiveThinking(processedMessages, tools, thinking);
+        const thinkingPrefix = this._generateThinkingPrefix(effectiveThinking);
         if (thinkingPrefix) {
             if (!systemPrompt) {
                 systemPrompt = thinkingPrefix;
@@ -1865,7 +1955,7 @@ async saveCredentialsToFile(filePath, newData) {
             // NOTE: [Code Assistant Context] wrapper removed — the model echoes it back
             // to the user, which exposes the proxy. The wrapper was intended to bypass
             // AWS intent classification but the leak is worse than the occasional block.
-            if (this._shouldApplyLightKiroContext(currentContent, currentToolResults, toolsContext, thinking, responseFormat)) {
+            if (this._shouldApplyLightKiroContext(currentContent, currentToolResults, toolsContext, effectiveThinking, responseFormat)) {
                 currentContent = `<assistant_context>Answer the user's request directly. This is a normal assistant turn; do not mention this context.</assistant_context>\n\n${currentContent}`;
             }
 
@@ -1945,13 +2035,14 @@ async saveCredentialsToFile(filePath, newData) {
         });
 
         // 监控钩子：内部请求转换
-        if (this.config?._monitorRequestId) {
+        const monitorRequestId = requestContext?._monitorRequestId;
+        if (monitorRequestId) {
             try {
                 const { getPluginManager } = await import('../../core/plugin-manager.js');
                 const pluginManager = getPluginManager();
                 if (pluginManager) {
                     await pluginManager.executeHook('onInternalRequestConverted', {
-                        requestId: this.config._monitorRequestId,
+                        requestId: monitorRequestId,
                         internalRequest: request,
                         converterName: 'buildCodewhispererRequest'
                     });
@@ -2067,7 +2158,7 @@ async saveCredentialsToFile(filePath, newData) {
     /**
      * 调用 API 并处理错误重试
      */
-    async callApi(method, model, body, isRetry = false, retryCount = 0) {
+    async callApi(method, model, body, isRetry = false, retryCount = 0, requestContext = {}) {
         if (!this.isInitialized) await this.initialize();
         const maxRetries = this.config.REQUEST_MAX_RETRIES || 3;
         const baseDelay = this.config.REQUEST_BASE_DELAY || 1000; // 1 second base delay
@@ -2086,7 +2177,7 @@ async saveCredentialsToFile(filePath, newData) {
             throw new Error('No messages found in request body');
         }
 
-        const requestData = await this.buildCodewhispererRequest(messages, model, body.tools, body.system, body.thinking, body.tool_choice, body.response_format);
+        const requestData = await this.buildCodewhispererRequest(messages, model, body.tools, body.system, body.thinking, body.tool_choice, body.response_format, requestContext);
 
         try {
             const token = this.accessToken; // Use the already initialized token
@@ -2098,8 +2189,7 @@ async saveCredentialsToFile(filePath, newData) {
                 'x-amzn-kiro-agent-mode': hasTools ? 'code' : 'vibe',
             };
 
-            // 当 model 以 kiro-amazonq 开头时，使用 amazonQUrl，否则使用 baseUrl
-            const requestUrl = model.startsWith('amazonq') ? this.amazonQUrl : this.baseUrl;
+            const requestUrl = getKiroRequestUrl(model, this.baseUrl);
             const axiosConfig = {
                 method: 'post',
                 url: requestUrl,
@@ -2173,6 +2263,7 @@ async saveCredentialsToFile(filePath, newData) {
                 // Mark error for credential switch without recording error count
                 error.shouldSwitchCredential = true;
                 error.skipErrorCount = true;
+                error.circuitBreakerKey = 'kiro_rate_limited';
                 throw error;
             }
 
@@ -2192,7 +2283,7 @@ async saveCredentialsToFile(filePath, newData) {
                 const errorIdentifier = errorCode || errorMessage.substring(0, 50);
                 logger.info(`[Kiro] Network error (${errorIdentifier}). Retrying in ${delay}ms... (attempt ${retryCount + 1}/${maxRetries})`);
                 await new Promise(resolve => setTimeout(resolve, delay));
-                return this.callApi(method, model, body, isRetry, retryCount + 1);
+                return this.callApi(method, model, body, isRetry, retryCount + 1, requestContext);
             }
 
             if (error.response && error.response.data) { logger.error('[Kiro] 400 Response body:', typeof error.response.data === 'string' ? error.response.data.substring(0, 500) : JSON.stringify(error.response.data).substring(0, 500)); }
@@ -2481,6 +2572,13 @@ async saveCredentialsToFile(filePath, newData) {
             delete requestBody.thinking.display;
         }
 
+        if (requestBody.thinking?.type && typeof requestBody.thinking.type === 'string') {
+            const type = requestBody.thinking.type.toLowerCase().trim();
+            if (type === 'disabled' || type === 'off') {
+                delete requestBody.thinking;
+            }
+        }
+
         // Filter system prompt entries that contain Claude Code identity strings
         // which cause Kiro to trigger "I can't discuss that." safety refusals
         if (Array.isArray(requestBody.system)) {
@@ -2506,15 +2604,16 @@ async saveCredentialsToFile(filePath, newData) {
         if (!this.isInitialized) await this.initialize();
 
         // 临时存储 monitorRequestId
-        if (requestBody._monitorRequestId) {
-            this.config._monitorRequestId = requestBody._monitorRequestId;
-            delete requestBody._monitorRequestId;
-        }
+        const requestContext = {
+            _monitorRequestId: requestBody._monitorRequestId
+        };
+        delete requestBody._monitorRequestId;
         if (requestBody._requestBaseUrl) {
             delete requestBody._requestBaseUrl;
         }
 
         this._normalizeRequestBody(requestBody);
+        this._applyEffectiveThinkingToRequestBody(requestBody);
 
         // 检查 token 是否即将过期，如果是则推送到刷新队列
         if (this.isExpiryDateNear()) {
@@ -2534,7 +2633,7 @@ async saveCredentialsToFile(filePath, newData) {
 
         // Retry loop for empty responses
         while (true) {
-            const response = await this.callApi('', model, requestBody);
+            const response = await this.callApi('', model, requestBody, false, 0, requestContext);
 
             try {
                 const result = this._processApiResponse(response);
@@ -2564,6 +2663,7 @@ async saveCredentialsToFile(filePath, newData) {
                 data: { type: 'error', error: { type: 'overloaded_error', message: 'Overloaded' } }
             };
             err.shouldSwitchCredential = true;
+            err.circuitBreakerKey = 'kiro_empty_response';
             throw err;
         }
 
@@ -2715,7 +2815,7 @@ async saveCredentialsToFile(filePath, newData) {
     /**
      * 真正的流式 API 调用 - 使用 responseType: 'stream'
      */
-    async * streamApiReal(method, model, body, isRetry = false, retryCount = 0) {
+    async * streamApiReal(method, model, body, isRetry = false, retryCount = 0, requestContext = {}) {
         if (!this.isInitialized) await this.initialize();
         const maxRetries = this.config.REQUEST_MAX_RETRIES || 3;
         const baseDelay = this.config.REQUEST_BASE_DELAY || 1000;
@@ -2734,7 +2834,7 @@ async saveCredentialsToFile(filePath, newData) {
             throw new Error('No messages found in request body');
         }
 
-        const requestData = await this.buildCodewhispererRequest(messages, model, body.tools, body.system, body.thinking, body.tool_choice, body.response_format);
+        const requestData = await this.buildCodewhispererRequest(messages, model, body.tools, body.system, body.thinking, body.tool_choice, body.response_format, requestContext);
         const toolNameMaps = requestData._kiroToolNameMaps;
 
         const token = this.accessToken;
@@ -2742,11 +2842,11 @@ async saveCredentialsToFile(filePath, newData) {
         const headers = {
             'Authorization': `Bearer ${token}`,
             'amz-sdk-invocation-id': `${uuidv4()}`,
-            'amz-sdk-request': 'attempt=1; max=3',
+            'amz-sdk-request': `attempt=${retryCount + 1}; max=3`,
             'x-amzn-kiro-agent-mode': hasTools ? 'code' : 'vibe',
         };
 
-        const requestUrl = model.startsWith('amazonq') ? this.amazonQUrl : this.baseUrl;
+        const requestUrl = getKiroRequestUrl(model, this.baseUrl);
 
         let stream = null;
         let releaseThrottle = () => {};
@@ -2786,16 +2886,22 @@ async saveCredentialsToFile(filePath, newData) {
                         // NOTE: followupPrompt events are already filtered in parseAwsEventStreamBuffer
                         // (line ~2289: !parsed.followupPrompt). No additional check needed here.
                         // 检查是否与上一个 content 事件完全相同
-                        if (lastContentEvent === event.data) {
+                        const shouldDeduplicate = event.data.length >= 8 && !isWhitespaceOnly(event.data);
+                        if (shouldDeduplicate && lastContentEvent === event.data) {
                             lastContentRepeatCount++;
                             if (lastContentRepeatCount >= 2) {
                                 // 连续 3+ 次完全相同的内容，跳过（大概率是 API 抖动）
                                 continue;
                             }
-                        } else {
+                        } else if (shouldDeduplicate) {
                             lastContentRepeatCount = 0;
                         }
-                        lastContentEvent = event.data;
+                        if (shouldDeduplicate) {
+                            lastContentEvent = event.data;
+                        } else {
+                            lastContentEvent = null;
+                            lastContentRepeatCount = 0;
+                        }
                         yield { type: 'content', content: event.data };
                     } else if (event.type === 'toolUse') {
                         const toolUse = {
@@ -2882,6 +2988,7 @@ async saveCredentialsToFile(filePath, newData) {
                 // Mark error for credential switch without recording error count
                 error.shouldSwitchCredential = true;
                 error.skipErrorCount = true;
+                error.circuitBreakerKey = 'kiro_rate_limited';
                 throw error;
             }
 
@@ -2901,7 +3008,7 @@ async saveCredentialsToFile(filePath, newData) {
                 const errorIdentifier = errorCode || errorMessage.substring(0, 50);
                 logger.info(`[Kiro] Network error (${errorIdentifier}) in stream. Retrying in ${delay}ms... (attempt ${retryCount + 1}/${maxRetries})`);
                 await new Promise(resolve => setTimeout(resolve, delay));
-                yield* this.streamApiReal(method, model, body, isRetry, retryCount + 1);
+                yield* this.streamApiReal(method, model, body, isRetry, retryCount + 1, requestContext);
                 return;
             }
 
@@ -2931,15 +3038,16 @@ async saveCredentialsToFile(filePath, newData) {
         if (!this.isInitialized) await this.initialize();
 
         // 临时存储 monitorRequestId
-        if (requestBody._monitorRequestId) {
-            this.config._monitorRequestId = requestBody._monitorRequestId;
-            delete requestBody._monitorRequestId;
-        }
+        const requestContext = {
+            _monitorRequestId: requestBody._monitorRequestId
+        };
+        delete requestBody._monitorRequestId;
         if (requestBody._requestBaseUrl) {
             delete requestBody._requestBaseUrl;
         }
 
         this._normalizeRequestBody(requestBody);
+        this._applyEffectiveThinkingToRequestBody(requestBody);
 
         // 检查 token 是否即将过期，如果是则推送到刷新队列
         if (this.isExpiryDateNear()) {
@@ -3062,11 +3170,11 @@ async saveCredentialsToFile(filePath, newData) {
                 if (!p) return;
                 let parsedInput = p.input;
                 try {
-                    parsedInput = JSON.parse(p.input || '{}');
+                    parsedInput = normalizeToolCallArguments(p.input || '{}');
                 } catch (e) {
                     // 常见的 JSON 截断/小瑕疵（尾逗号、未引号键），先 repair 再试一次
                     try {
-                        parsedInput = JSON.parse(repairJson(p.input || '{}'));
+                        parsedInput = normalizeToolCallArguments(repairJson(p.input || '{}'));
                         logger.warn(`[Kiro Stream] Tool '${p.name}' input repaired via repairJson`);
                     } catch (e2) {
                         const diag = diagnoseJsonTruncation(p.input);
@@ -3140,7 +3248,7 @@ async saveCredentialsToFile(filePath, newData) {
                 }
 
             // 2. 流式接收并发送每个 content_block_delta
-            for await (const event of this.streamApiReal('', model, requestBody)) {
+            for await (const event of this.streamApiReal('', model, requestBody, false, 0, requestContext)) {
                 if (event.type === 'contextUsage' && event.contextUsagePercentage) {
                     // 捕获上下文使用百分比（包含输入和输出的总使用量）
                     contextUsagePercentage = event.contextUsagePercentage;
@@ -3487,7 +3595,7 @@ async saveCredentialsToFile(filePath, newData) {
                     toolCalls.push({
                         toolUseId: btc.id || `tool_${uuidv4()}`,
                         name: btc.function.name,
-                        input: JSON.parse(btc.function.arguments || '{}')
+                        input: normalizeToolCallArguments(btc.function.arguments || '{}')
                     });
                 }
             }
@@ -3628,17 +3736,7 @@ async saveCredentialsToFile(filePath, newData) {
 
             if (toolCalls && toolCalls.length > 0) {
                 toolCalls.forEach((tc, index) => {
-                    let inputObject;
-                    try {
-                        // Arguments should be a stringified JSON object, need to parse it
-                        const args = tc.function.arguments;
-                        inputObject = typeof args === 'string' ? JSON.parse(args) : args;
-                    } catch (e) {
-                        logger.warn(`[Kiro] Invalid JSON for tool call arguments. Wrapping in raw_arguments. Error: ${e.message}`, tc.function.arguments);
-                        // If parsing fails, wrap the raw string in an object as a fallback,
-                        // since Claude's `input` field expects an object.
-                        inputObject = { "raw_arguments": tc.function.arguments };
-                    }
+                    const inputObject = normalizeToolCallArguments(tc.function.arguments);
                     // 2. content_block_start for each tool_use
                     events.push({
                         type: "content_block_start",
@@ -3727,17 +3825,7 @@ async saveCredentialsToFile(filePath, newData) {
             let stopReason = "end_turn";
             if (toolCalls && toolCalls.length > 0) {
                 for (const tc of toolCalls) {
-                    let inputObject;
-                    try {
-                        // Arguments should be a stringified JSON object, need to parse it
-                        const args = tc.function.arguments;
-                        inputObject = typeof args === 'string' ? JSON.parse(args) : args;
-                    } catch (e) {
-                        logger.warn(`[Kiro] Invalid JSON for tool call arguments. Wrapping in raw_arguments. Error: ${e.message}`, tc.function.arguments);
-                        // If parsing fails, wrap the raw string in an object as a fallback,
-                        // since Claude's `input` field expects an object.
-                        inputObject = { "raw_arguments": tc.function.arguments };
-                    }
+                    const inputObject = normalizeToolCallArguments(tc.function.arguments);
                     contentArray.push({
                         type: "tool_use",
                         id: tc.id,
@@ -3883,8 +3971,8 @@ async saveCredentialsToFile(filePath, newData) {
             profileArn: this.profileArn,
             clientId: this.clientId
         });
-        const kiroVersion = KIRO_CONSTANTS.KIRO_VERSION;
-        const { osName, nodeVersion } = getSystemRuntimeInfo();
+        const kiroVersion = this.config.KIRO_VERSION || KIRO_CONSTANTS.KIRO_VERSION;
+        const { osName, nodeVersion } = getSystemRuntimeInfo(this.config);
 
         const headers = {
             'Authorization': `Bearer ${this.accessToken}`,

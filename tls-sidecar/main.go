@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"fmt"
@@ -44,6 +45,8 @@ const (
 	readTimeout  = 30 * time.Second
 	writeTimeout = 0 // SSE 流式响应不设写超时（仅监听 localhost，安全）
 	idleTimeout  = 120 * time.Second
+	h2MaxAge     = 55 * time.Second
+	streamBuf    = 16 * 1024
 )
 
 // 全局 RoundTripper 缓存（按 proxyURL 分组，复用 H2 连接）
@@ -69,15 +72,34 @@ func getOrCreateRT(proxyURL string) *utlsRoundTripper {
 type utlsRoundTripper struct {
 	proxyURL string
 
-	mu      sync.Mutex
-	h2Conns map[string]*http2.ClientConn // H2 连接缓存 (per host)
+	mu         sync.Mutex
+	h2LastUsed map[string]time.Time
+	h2         *http2.Transport
+	h1         *http.Transport
+	h1Addrs    map[string]struct{}
+	h2Conns    map[string]*http2.ClientConn // H2 连接缓存 (per host)
 }
 
 func newUTLSRoundTripper(proxyURL string) *utlsRoundTripper {
-	return &utlsRoundTripper{
-		proxyURL: proxyURL,
-		h2Conns:  make(map[string]*http2.ClientConn),
+	rt := &utlsRoundTripper{
+		proxyURL:   proxyURL,
+		h2Conns:    make(map[string]*http2.ClientConn),
+		h2LastUsed: make(map[string]time.Time),
+		h1Addrs:    make(map[string]struct{}),
 	}
+	rt.h2 = &http2.Transport{
+		StrictMaxConcurrentStreams: true,
+		AllowHTTP:                  false,
+	}
+	rt.h1 = &http.Transport{
+		DialTLSContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+			return dialUTLS(ctx, network, addr, rt.proxyURL)
+		},
+		MaxIdleConns:        128,
+		MaxIdleConnsPerHost: 16,
+		IdleConnTimeout:     90 * time.Second,
+	}
+	return rt
 }
 
 func (rt *utlsRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
@@ -92,18 +114,33 @@ func (rt *utlsRoundTripper) RoundTrip(req *http.Request) (*http.Response, error)
 
 	// 尝试复用已有的 H2 连接
 	rt.mu.Lock()
-	if cc, ok := rt.h2Conns[addr]; ok {
+	if _, ok := rt.h1Addrs[addr]; ok {
 		rt.mu.Unlock()
-		if cc.CanTakeNewRequest() {
+		return rt.h1.RoundTrip(req)
+	}
+	if cc, ok := rt.h2Conns[addr]; ok {
+		lastUsed := rt.h2LastUsed[addr]
+		if time.Since(lastUsed) < h2MaxAge && cc.CanTakeNewRequest() {
+			rt.h2LastUsed[addr] = time.Now()
+			rt.mu.Unlock()
 			resp, err := cc.RoundTrip(req)
 			if err == nil {
 				return resp, nil
 			}
 			// H2 连接已失效，清除缓存重建
 			log.Printf("[TLS-Sidecar] Cached H2 conn failed for %s: %v, reconnecting", addr, err)
+			if req.GetBody != nil {
+				body, bodyErr := req.GetBody()
+				if bodyErr != nil {
+					return nil, bodyErr
+				}
+				req.Body = body
+			}
+			rt.mu.Lock()
 		}
-		rt.mu.Lock()
+		cc.Close()
 		delete(rt.h2Conns, addr)
+		delete(rt.h2LastUsed, addr)
 		rt.mu.Unlock()
 	} else {
 		rt.mu.Unlock()
@@ -117,15 +154,13 @@ func (rt *utlsRoundTripper) RoundTrip(req *http.Request) (*http.Response, error)
 
 	// 根据 ALPN 协商结果决定走 H2 还是 H1
 	alpn := conn.ConnectionState().NegotiatedProtocol
-	log.Printf("[TLS-Sidecar] Connected to %s, ALPN: %q", addr, alpn)
+	if alpn != "h2" && alpn != "http/1.1" {
+		log.Printf("[TLS-Sidecar] Unexpected ALPN for %s: %q", addr, alpn)
+	}
 
 	if alpn == "h2" {
 		// HTTP/2: 创建 H2 ClientConn
-		t2 := &http2.Transport{
-			StrictMaxConcurrentStreams: true,
-			AllowHTTP:                  false,
-		}
-		cc, err := t2.NewClientConn(conn)
+		cc, err := rt.h2.NewClientConn(conn)
 		if err != nil {
 			conn.Close()
 			return nil, fmt.Errorf("h2 client conn: %w", err)
@@ -133,33 +168,18 @@ func (rt *utlsRoundTripper) RoundTrip(req *http.Request) (*http.Response, error)
 
 		rt.mu.Lock()
 		rt.h2Conns[addr] = cc
+		rt.h2LastUsed[addr] = time.Now()
 		rt.mu.Unlock()
 
 		return cc.RoundTrip(req)
 	}
 
-	// HTTP/1.1: 通过一次性 Transport 使用已建立的 TLS 连接
-	// DialTLSContext 返回已完成 TLS 握手的 conn，http.Transport 不会重复握手
-	used := false
-	t1 := &http.Transport{
-		DialTLSContext: func(ctx context.Context, network, a string) (net.Conn, error) {
-			if !used {
-				used = true
-				return conn, nil
-			}
-			// 后续连接走正常 uTLS dial
-			return dialUTLS(ctx, network, a, rt.proxyURL)
-		},
-		MaxIdleConnsPerHost: 1,
-		IdleConnTimeout:     90 * time.Second,
-	}
-
-	resp, err := t1.RoundTrip(req)
-	if err != nil {
-		conn.Close()
-		t1.CloseIdleConnections()
-	}
-	return resp, err
+	// HTTP/1.1 falls back to the shared transport so keep-alive can be reused.
+	rt.mu.Lock()
+	rt.h1Addrs[addr] = struct{}{}
+	rt.mu.Unlock()
+	conn.Close()
+	return rt.h1.RoundTrip(req)
 }
 
 func (rt *utlsRoundTripper) CloseIdleConnections() {
@@ -168,6 +188,13 @@ func (rt *utlsRoundTripper) CloseIdleConnections() {
 	for k, cc := range rt.h2Conns {
 		cc.Close()
 		delete(rt.h2Conns, k)
+		delete(rt.h2LastUsed, k)
+	}
+	for k := range rt.h1Addrs {
+		delete(rt.h1Addrs, k)
+	}
+	if rt.h1 != nil {
+		rt.h1.CloseIdleConnections()
 	}
 }
 
@@ -240,10 +267,19 @@ func handleProxy(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Build outgoing request
-	outReq, err := http.NewRequestWithContext(r.Context(), r.Method, targetURL, r.Body)
+	bodyBytes, err := io.ReadAll(r.Body)
+	if err != nil {
+		http.Error(w, fmt.Sprintf(`{"error":"failed to read request body: %s"}`, err), http.StatusBadRequest)
+		return
+	}
+
+	outReq, err := http.NewRequestWithContext(r.Context(), r.Method, targetURL, bytes.NewReader(bodyBytes))
 	if err != nil {
 		http.Error(w, fmt.Sprintf(`{"error":"failed to create request: %s"}`, err), http.StatusInternalServerError)
 		return
+	}
+	outReq.GetBody = func() (io.ReadCloser, error) {
+		return io.NopCloser(bytes.NewReader(bodyBytes)), nil
 	}
 
 	// Copy headers (skip internal + hop-by-hop)
@@ -269,7 +305,7 @@ func handleProxy(w http.ResponseWriter, r *http.Request) {
 	// 针对 Grok 的特殊处理：如果 Accept-Encoding 包含 br 且环境可能存在压缩协商问题
 	// 强制设置为标准的浏览器组合
 	if ae := outReq.Header["Accept-Encoding"]; len(ae) > 0 {
-		outReq.Header["Accept-Encoding"] = []string{"gzip, deflate, br, zstd"}
+		outReq.Header["Accept-Encoding"] = []string{"gzip, deflate"}
 	}
 
 	// Execute via uTLS RoundTripper
@@ -292,7 +328,7 @@ func handleProxy(w http.ResponseWriter, r *http.Request) {
 
 	// Stream body (SSE-friendly: flush after every read)
 	flusher, canFlush := w.(http.Flusher)
-	buf := make([]byte, 32*1024)
+	buf := make([]byte, streamBuf)
 	for {
 		n, readErr := resp.Body.Read(buf)
 		if n > 0 {

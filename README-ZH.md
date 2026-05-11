@@ -347,6 +347,7 @@ docker compose up -d
 2. **完成授权**：在客户端中登录账号，生成 `kiro-auth-token.json` 凭据文件
 3. **最佳实践**：推荐配合 **Claude Code** 使用，可获得最优体验
 4. **重要提示**：Kiro 服务使用政策已更新，请访问官方网站查看最新使用限制和条款
+5. **客户端指纹**：如 Kiro 客户端版本更新，可通过 `KIRO_VERSION`、`KIRO_ELECTRON_VERSION` 覆盖默认 UA 指纹。
 
 #### Kiro 扩展思考 (Claude 模型)
 AIClient2API 在使用路由到 `claude-kiro-oauth` 的 Claude 兼容请求 (`/v1/messages`) 或 OpenAI 兼容请求 (`/v1/chat/completions`) 时支持 Kiro 扩展思考。
@@ -573,9 +574,11 @@ curl http://localhost:3000/claude-kiro-oauth/v1/chat/completions \
     ```json
     {
       "TLS_SIDECAR_ENABLED": true,
+      "TLS_SIDECAR_ENABLED_PROVIDERS": ["claude-kiro-oauth"],
       "TLS_SIDECAR_PORT": 9090
     }
     ```
+    `TLS_SIDECAR_ENABLED_PROVIDERS` 留空或设为 `["*"]` 表示所有提供商都走 Sidecar；只想给 Kiro 使用时填 `["claude-kiro-oauth"]`。
 
 3.  **工作原理**：
     - 开启后系统自动启动并管理该 Go 进程。

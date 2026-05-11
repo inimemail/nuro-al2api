@@ -18,10 +18,11 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const DEFAULT_PORT = 9090;
-const HEALTH_CHECK_INTERVAL = 30000; // 30s
+const HEALTH_CHECK_INTERVAL = 10000; // 10s
 const HEALTH_CHECK_TIMEOUT = 3000;   // 3s
 const MAX_RESTART_ATTEMPTS = 5;
 const RESTART_DELAY = 2000;          // 2s
+const HEALTH_CHECK_AGENT = new http.Agent({ keepAlive: true, maxSockets: 1 });
 
 class TLSSidecar {
     constructor() {
@@ -183,9 +184,14 @@ class TLSSidecar {
         }
 
         const targetUrl = axiosConfig.url;
+        if (!targetUrl || typeof targetUrl !== 'string' || !targetUrl.startsWith('http')) {
+            logger.warn(`[TLS-Sidecar] Skip wrapping invalid target URL: ${targetUrl || '<empty>'}`);
+            return axiosConfig;
+        }
 
         // 将请求指向 sidecar
         axiosConfig.url = this.baseUrl;
+        axiosConfig.baseURL = undefined;
 
         // 通过 header 传递目标和代理信息
         axiosConfig.headers = axiosConfig.headers || {};
@@ -243,7 +249,7 @@ class TLSSidecar {
 
     _healthCheck() {
         return new Promise((resolve) => {
-            const req = http.get(`${this.baseUrl}/health`, { timeout: HEALTH_CHECK_TIMEOUT }, (res) => {
+            const req = http.get(`${this.baseUrl}/health`, { timeout: HEALTH_CHECK_TIMEOUT, agent: HEALTH_CHECK_AGENT }, (res) => {
                 let body = '';
                 res.on('data', (chunk) => body += chunk);
                 res.on('end', () => {
@@ -255,6 +261,7 @@ class TLSSidecar {
                 req.destroy();
                 resolve(false);
             });
+            req.end();
         });
     }
 

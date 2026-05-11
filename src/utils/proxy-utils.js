@@ -139,13 +139,19 @@ export function configureAxiosProxy(axiosConfig, config, providerType) {
  * @returns {boolean} 是否启用 TLS Sidecar
  */
 export function isTLSSidecarEnabledForProvider(config, providerType) {
-    if (!config || !config.TLS_SIDECAR_ENABLED || !config.TLS_SIDECAR_ENABLED_PROVIDERS) {
+    if (!config || !config.TLS_SIDECAR_ENABLED) {
         return false;
     }
 
     const enabledProviders = config.TLS_SIDECAR_ENABLED_PROVIDERS;
+    if (enabledProviders === undefined || enabledProviders === null) {
+        return true;
+    }
     if (!Array.isArray(enabledProviders)) {
         return false;
+    }
+    if (enabledProviders.length === 0 || enabledProviders.includes('*')) {
+        return true;
     }
 
     // 1. 尝试精确匹配
