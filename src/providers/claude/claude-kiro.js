@@ -323,6 +323,15 @@ function resolveKiroModel(model) {
     return MODEL_MAPPING[model] || model;
 }
 
+function isInvalidKiroModelError(error) {
+    const data = error?.response?.data;
+    if (data?.reason === 'INVALID_MODEL_ID') return true;
+    if (typeof data === 'string') {
+        return data.includes('INVALID_MODEL_ID') || data.includes('Invalid model ID');
+    }
+    return false;
+}
+
 function sanitizeKiroJsonSchema(schema) {
     if (Array.isArray(schema)) {
         return schema.map(item => sanitizeKiroJsonSchema(item));
@@ -2210,6 +2219,9 @@ async saveCredentialsToFile(filePath, newData) {
             const status = error.response?.status;
             const errorCode = error.code;
             const errorMessage = error.message || '';
+            if (status === 400 && isInvalidKiroModelError(error)) {
+                logger.error(`[Kiro] Invalid model ID from upstream. requested=${model}, resolved=${resolveKiroModel(model)}`);
+            }
             
             // 检查是否为可重试的网络错误
             const isNetworkError = isRetryableNetworkError(error);
@@ -2936,6 +2948,9 @@ async saveCredentialsToFile(filePath, newData) {
             const status = error.response?.status;
             const errorCode = error.code;
             const errorMessage = error.message || '';
+            if (status === 400 && isInvalidKiroModelError(error)) {
+                logger.error(`[Kiro] Invalid model ID from upstream in stream. requested=${model}, resolved=${resolveKiroModel(model)}`);
+            }
             
             // 检查是否为可重试的网络错误
             const isNetworkError = isRetryableNetworkError(error);
