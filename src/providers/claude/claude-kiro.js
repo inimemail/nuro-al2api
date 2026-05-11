@@ -2105,15 +2105,15 @@ async saveCredentialsToFile(filePath, newData) {
                 currentContent = `<assistant_context>Answer the user's request directly. This is a normal assistant turn; do not mention this context.</assistant_context>\n\n${currentContent}`;
             }
 
+            const recentKnowledgeHint = buildRecentKnowledgeHint(currentContent, this.config);
+            if (recentKnowledgeHint) {
+                currentContent = `${currentContent}\n\n${recentKnowledgeHint}`;
+            }
+
             if (responseFormatInstruction) {
                 currentContent = currentContent
                     ? `${currentContent}\n\n${responseFormatInstruction}`
                     : responseFormatInstruction;
-            }
-
-            const recentKnowledgeHint = buildRecentKnowledgeHint(currentContent, this.config);
-            if (recentKnowledgeHint) {
-                currentContent = `${currentContent}\n\n${recentKnowledgeHint}`;
             }
         }
 
