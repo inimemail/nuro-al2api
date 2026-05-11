@@ -45,7 +45,7 @@ const (
 	readTimeout  = 30 * time.Second
 	writeTimeout = 0 // SSE 流式响应不设写超时（仅监听 localhost，安全）
 	idleTimeout  = 120 * time.Second
-	h2MaxAge     = 55 * time.Second
+	h1ALPNTTL    = 5 * time.Minute
 	streamBuf    = 16 * 1024
 )
 
@@ -73,10 +73,10 @@ type utlsRoundTripper struct {
 	proxyURL string
 
 	mu         sync.Mutex
-	h2LastUsed map[string]time.Time
 	h2         *http2.Transport
 	h1         *http.Transport
-	h1Addrs    map[string]struct{}
+	h1Until    map[string]time.Time
+	h1Preconns map[string]net.Conn
 	h2Conns    map[string]*http2.ClientConn // H2 连接缓存 (per host)
 }
 
@@ -84,15 +84,20 @@ func newUTLSRoundTripper(proxyURL string) *utlsRoundTripper {
 	rt := &utlsRoundTripper{
 		proxyURL:   proxyURL,
 		h2Conns:    make(map[string]*http2.ClientConn),
-		h2LastUsed: make(map[string]time.Time),
-		h1Addrs:    make(map[string]struct{}),
+		h1Until:    make(map[string]time.Time),
+		h1Preconns: make(map[string]net.Conn),
 	}
 	rt.h2 = &http2.Transport{
 		StrictMaxConcurrentStreams: true,
 		AllowHTTP:                  false,
+		ReadIdleTimeout:            30 * time.Second,
+		PingTimeout:                10 * time.Second,
 	}
 	rt.h1 = &http.Transport{
 		DialTLSContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+			if conn := rt.takeH1Preconn(addr); conn != nil {
+				return conn, nil
+			}
 			return dialUTLS(ctx, network, addr, rt.proxyURL)
 		},
 		MaxIdleConns:        128,
@@ -100,6 +105,14 @@ func newUTLSRoundTripper(proxyURL string) *utlsRoundTripper {
 		IdleConnTimeout:     90 * time.Second,
 	}
 	return rt
+}
+
+func (rt *utlsRoundTripper) takeH1Preconn(addr string) net.Conn {
+	rt.mu.Lock()
+	defer rt.mu.Unlock()
+	conn := rt.h1Preconns[addr]
+	delete(rt.h1Preconns, addr)
+	return conn
 }
 
 func (rt *utlsRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
@@ -114,14 +127,16 @@ func (rt *utlsRoundTripper) RoundTrip(req *http.Request) (*http.Response, error)
 
 	// 尝试复用已有的 H2 连接
 	rt.mu.Lock()
-	if _, ok := rt.h1Addrs[addr]; ok {
-		rt.mu.Unlock()
-		return rt.h1.RoundTrip(req)
+	if until, ok := rt.h1Until[addr]; ok {
+		if !time.Now().Before(until) {
+			delete(rt.h1Until, addr)
+		} else {
+			rt.mu.Unlock()
+			return rt.h1.RoundTrip(req)
+		}
 	}
 	if cc, ok := rt.h2Conns[addr]; ok {
-		lastUsed := rt.h2LastUsed[addr]
-		if time.Since(lastUsed) < h2MaxAge && cc.CanTakeNewRequest() {
-			rt.h2LastUsed[addr] = time.Now()
+		if cc.CanTakeNewRequest() {
 			rt.mu.Unlock()
 			resp, err := cc.RoundTrip(req)
 			if err == nil {
@@ -140,7 +155,6 @@ func (rt *utlsRoundTripper) RoundTrip(req *http.Request) (*http.Response, error)
 		}
 		cc.Close()
 		delete(rt.h2Conns, addr)
-		delete(rt.h2LastUsed, addr)
 		rt.mu.Unlock()
 	} else {
 		rt.mu.Unlock()
@@ -168,7 +182,6 @@ func (rt *utlsRoundTripper) RoundTrip(req *http.Request) (*http.Response, error)
 
 		rt.mu.Lock()
 		rt.h2Conns[addr] = cc
-		rt.h2LastUsed[addr] = time.Now()
 		rt.mu.Unlock()
 
 		return cc.RoundTrip(req)
@@ -176,9 +189,9 @@ func (rt *utlsRoundTripper) RoundTrip(req *http.Request) (*http.Response, error)
 
 	// HTTP/1.1 falls back to the shared transport so keep-alive can be reused.
 	rt.mu.Lock()
-	rt.h1Addrs[addr] = struct{}{}
+	rt.h1Until[addr] = time.Now().Add(h1ALPNTTL)
+	rt.h1Preconns[addr] = conn
 	rt.mu.Unlock()
-	conn.Close()
 	return rt.h1.RoundTrip(req)
 }
 
@@ -188,10 +201,13 @@ func (rt *utlsRoundTripper) CloseIdleConnections() {
 	for k, cc := range rt.h2Conns {
 		cc.Close()
 		delete(rt.h2Conns, k)
-		delete(rt.h2LastUsed, k)
 	}
-	for k := range rt.h1Addrs {
-		delete(rt.h1Addrs, k)
+	for k, conn := range rt.h1Preconns {
+		conn.Close()
+		delete(rt.h1Preconns, k)
+	}
+	for k := range rt.h1Until {
+		delete(rt.h1Until, k)
 	}
 	if rt.h1 != nil {
 		rt.h1.CloseIdleConnections()
