@@ -85,6 +85,9 @@ export async function initializeConfig(args = process.argv.slice(2), configFileP
         CREDENTIAL_SWITCH_MAX_RETRIES: 5, // 坏凭证切换最大重试次数（用于认证错误后切换凭证）
         STREAM_HEARTBEAT_INTERVAL_MS: 15000,
         KIRO_STREAM_TIMEOUT_MS: 0,
+        KIRO_REGION: 'us-east-1',
+        KIRO_AUTH_REGION: null,
+        KIRO_API_REGION: null,
         KIRO_ENABLE_LIGHT_CONTEXT: false,
         KIRO_ENABLE_RECENT_KNOWLEDGE_HINT: true,
         KIRO_USE_DEFAULT_RECENT_FACTS: true,

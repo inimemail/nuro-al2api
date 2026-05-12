@@ -34,6 +34,7 @@ const KIRO_CONSTANTS = {
     REFRESH_URL: 'https://prod.{{region}}.auth.desktop.kiro.dev/refreshToken',
     REFRESH_IDC_URL: 'https://oidc.{{region}}.amazonaws.com/token',
     BASE_URL: 'https://q.{{region}}.amazonaws.com/generateAssistantResponse',
+    DEFAULT_REGION: 'us-east-1',
     DEFAULT_MODEL_NAME: 'claude-sonnet-4-5',
     AXIOS_TIMEOUT: 300000, // 5 minutes timeout for long-running requests
     STREAM_TIMEOUT: 0, // Disable axios timeout for real streaming requests.
@@ -888,6 +889,15 @@ function getKiroRequestUrl(model, baseUrl) {
     return baseUrl;
 }
 
+function firstNonEmptyString(...values) {
+    for (const value of values) {
+        if (typeof value === 'string' && value.trim()) {
+            return value.trim();
+        }
+    }
+    return null;
+}
+
 function isToolHeavyRequest(messages, tools) {
     if (!Array.isArray(tools) || tools.length === 0) return false;
     const toolNames = tools
@@ -1122,28 +1132,46 @@ async loadCredentials() {
         applyCredential('expiresAt');
         applyCredential('profileArn');
         applyCredential('region');
+        applyCredential('authRegion');
+        applyCredential('apiRegion');
         applyCredential('idcRegion');
 
-        if (!this.region) {
-            logger.warn('[Kiro Auth] Region not found in credentials. Using default region us-east-1 for URLs.');
-            this.region = 'us-east-1';
-        }
+        const defaultRegion = firstNonEmptyString(this.config.KIRO_REGION, KIRO_CONSTANTS.DEFAULT_REGION);
+        // Keep auth and API regions independent, matching kiro.rs:
+        // credentials.region is a backward-compatible auth-region field.
+        this.authRegion = firstNonEmptyString(
+            this.authRegion,
+            this.idcRegion,
+            this.region,
+            this.config.KIRO_AUTH_REGION,
+            defaultRegion
+        );
+        this.apiRegion = firstNonEmptyString(
+            this.apiRegion,
+            this.config.KIRO_API_REGION,
+            this.config.KIRO_REGION,
+            defaultRegion
+        );
+        this.region = firstNonEmptyString(this.region, defaultRegion);
+        this.idcRegion = firstNonEmptyString(this.idcRegion, this.authRegion);
 
         // idcRegion 用于 REFRESH_IDC_URL，如果未设置则使用 region
         if (!this.idcRegion) {
-            this.idcRegion = this.region;
+            this.idcRegion = this.authRegion;
         }
 
-        this.refreshUrl = (this.config.KIRO_REFRESH_URL || KIRO_CONSTANTS.REFRESH_URL).replace("{{region}}", this.region);
+        this.refreshUrl = (this.config.KIRO_REFRESH_URL || KIRO_CONSTANTS.REFRESH_URL).replace("{{region}}", this.authRegion);
         this.refreshIDCUrl = (this.config.KIRO_REFRESH_IDC_URL || KIRO_CONSTANTS.REFRESH_IDC_URL).replace("{{region}}", this.idcRegion);
-        this.baseUrl = (this.config.KIRO_BASE_URL || KIRO_CONSTANTS.BASE_URL).replace("{{region}}", this.region);
+        this.baseUrl = (this.config.KIRO_BASE_URL || KIRO_CONSTANTS.BASE_URL).replace("{{region}}", this.apiRegion);
+        logger.info(`[Kiro Auth] Region resolved: authRegion=${this.authRegion}, apiRegion=${this.apiRegion}`);
     } catch (error) {
         logger.warn(`[Kiro Auth] Error during credential loading: ${error.message}`);
     }
 }
 
 async initializeAuth(forceRefresh = false) {
-    if (this.accessToken && !forceRefresh) {
+    const hasValidAccessToken = this.accessToken && !this.isTokenExpired();
+    if (hasValidAccessToken && !forceRefresh) {
         logger.debug('[Kiro Auth] Access token already available and not forced refresh.');
         return;
     }
@@ -1153,7 +1181,7 @@ async initializeAuth(forceRefresh = false) {
 
     // 只有在明确要求强制刷新，或者 AccessToken 确实缺失时，才执行刷新
     // 注意：在 V2 架构下，此方法主要由 PoolManager 的后台队列调用
-    if (forceRefresh || (!this.accessToken && this.refreshToken)) {
+    if (forceRefresh || (!hasValidAccessToken && this.refreshToken)) {
         if (!this.refreshToken) {
             throw new Error('No refresh token available to refresh access token.');
         }
@@ -2782,7 +2810,10 @@ async saveCredentialsToFile(filePath, newData) {
         this._applyEffectiveThinkingToRequestBody(requestBody);
 
         // 检查 token 是否即将过期，如果是则推送到刷新队列
-        if (this.isExpiryDateNear()) {
+        if (this.isTokenExpired()) {
+            logger.info('[Kiro] Token is expired, refreshing before generateContent...');
+            await this.initializeAuth(true);
+        } else if (this.isExpiryDateNear()) {
             logger.info('[Kiro] Token is near expiry, marking credential as need refresh...');
             this._markCredentialNeedRefresh('Token near expiry in generateContent');
         }
@@ -3235,7 +3266,10 @@ async saveCredentialsToFile(filePath, newData) {
         this._applyEffectiveThinkingToRequestBody(requestBody);
 
         // 检查 token 是否即将过期，如果是则推送到刷新队列
-        if (this.isExpiryDateNear()) {
+        if (this.isTokenExpired()) {
+            logger.info('[Kiro] Token is expired, refreshing before generateContentStream...');
+            await this.initializeAuth(true);
+        } else if (this.isExpiryDateNear()) {
             logger.info('[Kiro] Token is near expiry, marking credential as need refresh...');
             this._markCredentialNeedRefresh('Token near expiry in generateContentStream');
         }
@@ -4073,7 +4107,9 @@ async saveCredentialsToFile(filePath, newData) {
      */
     isExpiryDateNear() {
         try {
+            if (!this.expiresAt) return true;
             const expirationTime = new Date(this.expiresAt);
+            if (Number.isNaN(expirationTime.getTime())) return true;
             const nearMinutes = 30;
             const { message, isNearExpiry } = formatExpiryLog('Kiro', expirationTime.getTime(), nearMinutes);
             logger.info(message);

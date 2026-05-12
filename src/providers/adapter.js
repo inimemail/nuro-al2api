@@ -393,8 +393,8 @@ export class KiroApiServiceAdapter extends ApiServiceAdapter {
         if (!this.kiroApiService.isInitialized) {
             await this.kiroApiService.initialize();
         }
-        if(this.isExpiryDateNear()===true){
-            logger.info(`[Kiro] Expiry date is near, refreshing token...`);
+        if(this.kiroApiService.isTokenExpired() || this.isExpiryDateNear()===true){
+            logger.info(`[Kiro] Token is expired or near expiry, refreshing token...`);
             await this.kiroApiService.initializeAuth(true);
             return true;
         }
@@ -778,4 +778,3 @@ export function getServiceAdapter(config) {
     }
     return serviceInstances[providerKey];
 }
-
