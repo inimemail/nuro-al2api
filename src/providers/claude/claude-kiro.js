@@ -3313,7 +3313,7 @@ async saveCredentialsToFile(filePath, newData) {
                 }];
             }
             if (blockType === 'text') {
-                if (streamState.textBlockIndex != null) return [];
+                if (streamState.textBlockIndex != null && !streamState.stoppedBlocks.has(streamState.textBlockIndex)) return [];
                 const idx = streamState.nextBlockIndex++;
                 streamState.textBlockIndex = idx;
                 return [{
@@ -3363,6 +3363,79 @@ async saveCredentialsToFile(filePath, newData) {
                 delta: { type: "thinking_delta", thinking: decodedThinking }
             });
             return events;
+        };
+
+        const flushBufferedTextBeforeToolUse = (events) => {
+            if (!thinkingRequested) {
+                if (streamState.buffer) {
+                    events.push(...createTextDeltaEvents(streamState.buffer));
+                    streamState.buffer = '';
+                }
+                return;
+            }
+
+            if (streamState.inThinking && streamState.buffer) {
+                let endPos = findRealThinkingEndTagAtBufferEnd(streamState.buffer);
+                if (endPos === -1) endPos = findRealThinkingEndTagBeforeText(streamState.buffer);
+                if (endPos !== -1) {
+                    const thinkingPart = streamState.buffer.slice(0, endPos);
+                    const remaining = streamState.buffer.slice(endPos + KIRO_THINKING.END_TAG.length).trimStart();
+                    if (thinkingPart) events.push(...createThinkingDeltaEvents(thinkingPart));
+                    streamState.buffer = '';
+                    streamState.inThinking = false;
+                    streamState.thinkingExtracted = true;
+                    streamState.stripThinkingLeadingNewline = false;
+                    streamState.stripTextLeadingNewlinesAfterThinking = false;
+                    events.push(...createThinkingDeltaEvents(""));
+                    if (streamState.thinkingBlockIndex != null) {
+                        events.push({
+                            type: "content_block_delta",
+                            index: streamState.thinkingBlockIndex,
+                            delta: { type: "signature_delta", signature: generateFakeThinkingSignature() }
+                        });
+                    }
+                    events.push(...stopBlock(streamState.thinkingBlockIndex));
+                    if (remaining) events.push(...createTextDeltaEvents(remaining));
+                }
+            }
+
+            if (streamState.inThinking) {
+                if (streamState.stripThinkingLeadingNewline) {
+                    if (streamState.buffer.startsWith('\r\n')) streamState.buffer = streamState.buffer.slice(2);
+                    else if (streamState.buffer.startsWith('\n')) streamState.buffer = streamState.buffer.slice(1);
+                    streamState.stripThinkingLeadingNewline = false;
+                }
+                if (streamState.buffer) events.push(...createThinkingDeltaEvents(streamState.buffer));
+                streamState.buffer = '';
+                streamState.inThinking = false;
+                streamState.thinkingExtracted = true;
+                streamState.stripTextLeadingNewlinesAfterThinking = false;
+                events.push(...createThinkingDeltaEvents(""));
+                if (streamState.thinkingBlockIndex != null) {
+                    events.push({
+                        type: "content_block_delta",
+                        index: streamState.thinkingBlockIndex,
+                        delta: { type: "signature_delta", signature: generateFakeThinkingSignature() }
+                    });
+                }
+                events.push(...stopBlock(streamState.thinkingBlockIndex));
+            }
+
+            if (!streamState.inThinking && !streamState.thinkingExtracted && streamState.pendingTextBeforeThinking) {
+                events.push(...createTextDeltaEvents(streamState.pendingTextBeforeThinking));
+                streamState.pendingTextBeforeThinking = '';
+            }
+
+            if (streamState.thinkingExtracted && streamState.buffer) {
+                let rest = streamState.buffer;
+                streamState.buffer = '';
+                if (streamState.stripTextLeadingNewlinesAfterThinking) {
+                    if (rest.startsWith('\r\n\r\n')) rest = rest.slice(4);
+                    else if (rest.startsWith('\n\n')) rest = rest.slice(2);
+                    streamState.stripTextLeadingNewlinesAfterThinking = false;
+                }
+                if (rest) events.push(...createTextDeltaEvents(rest));
+            }
         };
 
         function* pushEvents(events) {
@@ -3620,10 +3693,12 @@ async saveCredentialsToFile(filePath, newData) {
                 } else if (event.type === 'toolUse') {
                     const tc = event.toolUse;
                     const toolEvents = [];
+                    const flushToolBoundaryText = () => flushBufferedTextBeforeToolUse(toolEvents);
 
                     // 统计工具调用的内容到 totalContent（用于 token 计算）
                     // 工具调用事件（包含 name 和 toolUseId）
                     if (tc.name && tc.toolUseId) {
+                        flushToolBoundaryText();
                         // 遇到工具调用时，立即关闭文本块，避免前端等待到流结束才看到 content_block_stop
                         toolEvents.push(...stopBlock(streamState.textBlockIndex));
 
