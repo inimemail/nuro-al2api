@@ -2959,14 +2959,18 @@ async saveCredentialsToFile(filePath, newData) {
      */
     parseAwsEventStreamBuffer(buffer) {
         const events = [];
-        let remaining = buffer;
+        const source = Buffer.isBuffer(buffer) ? buffer.toString('utf8') : String(buffer || '');
         let searchStart = 0;
+        let remainingStart = source.length;
         
         while (true) {
             // 查找真正的 JSON payload 起始位置。AWS Event Stream 包含二进制头部，
             // payload 对象里的 key 顺序不稳定，所以不能依赖 {"input": 这类固定开头。
-            const jsonStart = remaining.indexOf('{', searchStart);
-            if (jsonStart < 0) break;
+            const jsonStart = source.indexOf('{', searchStart);
+            if (jsonStart < 0) {
+                remainingStart = source.length;
+                break;
+            }
             
             // 正确处理嵌套的 {} - 使用括号计数法
             let braceCount = 0;
@@ -2974,8 +2978,8 @@ async saveCredentialsToFile(filePath, newData) {
             let inString = false;
             let escapeNext = false;
             
-            for (let i = jsonStart; i < remaining.length; i++) {
-                const char = remaining[i];
+            for (let i = jsonStart; i < source.length; i++) {
+                const char = source[i];
                 
                 if (escapeNext) {
                     escapeNext = false;
@@ -3007,11 +3011,11 @@ async saveCredentialsToFile(filePath, newData) {
             
             if (jsonEnd < 0) {
                 // 不完整的 JSON，保留在缓冲区等待更多数据
-                remaining = remaining.substring(jsonStart);
+                remainingStart = jsonStart;
                 break;
             }
             
-            const jsonStr = remaining.substring(jsonStart, jsonEnd + 1);
+            const jsonStr = source.substring(jsonStart, jsonEnd + 1);
             try {
                 const parsed = JSON.parse(jsonStr);
                 // 处理 content 事件
@@ -3079,20 +3083,20 @@ async saveCredentialsToFile(filePath, newData) {
             } catch (e) {
                 // JSON 解析失败，跳过这个 "{" 继续搜索，避免二进制头部中的偶然字符阻塞后续 payload
                 searchStart = jsonStart + 1;
+                remainingStart = searchStart;
                 continue;
             }
             
             searchStart = jsonEnd + 1;
-            if (searchStart >= remaining.length) {
-                remaining = '';
+            remainingStart = searchStart;
+            if (searchStart >= source.length) {
+                remainingStart = source.length;
                 break;
             }
         }
         
         // 如果 searchStart 有进展，截取剩余部分
-        if (searchStart > 0 && remaining.length > 0) {
-            remaining = remaining.substring(searchStart);
-        }
+        const remaining = remainingStart < source.length ? source.substring(remainingStart) : '';
         
         return { events, remaining };
     }
@@ -3217,6 +3221,26 @@ async saveCredentialsToFile(filePath, newData) {
                 for (const event of remainingEvents) {
                     if (event.type === 'content' && event.data) {
                         yield { type: 'content', content: event.data };
+                    } else if (event.type === 'toolUse') {
+                        const toolUse = {
+                            ...event.data,
+                            name: toolNameMaps?.fromKiroName ? toolNameMaps.fromKiroName(event.data?.name) : event.data?.name
+                        };
+                        yield { type: 'toolUse', toolUse };
+                    } else if (event.type === 'toolUseInput') {
+                        yield {
+                            type: 'toolUseInput',
+                            toolUseId: event.data.toolUseId,
+                            input: event.data.input
+                        };
+                    } else if (event.type === 'toolUseStop') {
+                        yield {
+                            type: 'toolUseStop',
+                            toolUseId: event.data.toolUseId,
+                            stop: event.data.stop
+                        };
+                    } else if (event.type === 'contextUsage') {
+                        yield { type: 'contextUsage', contextUsagePercentage: event.data.contextUsagePercentage };
                     }
                 }
             }
