@@ -1450,6 +1450,85 @@ async saveCredentialsToFile(filePath, newData) {
         };
     }
 
+    _reconcileKiroToolHistory(history, currentToolResults = []) {
+        const availableToolUseIds = new Set();
+        const pairedToolUseIds = new Set();
+
+        for (const item of history) {
+            const assistant = item?.assistantResponseMessage;
+            if (Array.isArray(assistant?.toolUses)) {
+                for (const toolUse of assistant.toolUses) {
+                    if (toolUse?.toolUseId) availableToolUseIds.add(toolUse.toolUseId);
+                }
+            }
+
+            const user = item?.userInputMessage;
+            const context = user?.userInputMessageContext;
+            if (!Array.isArray(context?.toolResults)) continue;
+
+            const filteredResults = [];
+            for (const result of context.toolResults) {
+                const id = result?.toolUseId;
+                if (!id || !availableToolUseIds.has(id)) {
+                    logger.warn(`[Kiro] Dropping orphaned historical tool_result: ${id || 'unknown'}`);
+                    continue;
+                }
+                if (pairedToolUseIds.has(id)) {
+                    logger.warn(`[Kiro] Dropping duplicate historical tool_result: ${id}`);
+                    continue;
+                }
+                pairedToolUseIds.add(id);
+                filteredResults.push(result);
+            }
+
+            if (filteredResults.length > 0) {
+                context.toolResults = filteredResults;
+            } else {
+                delete context.toolResults;
+            }
+            if (Object.keys(context).length === 0) {
+                delete user.userInputMessageContext;
+            }
+        }
+
+        const filteredCurrentToolResults = [];
+        for (const result of currentToolResults) {
+            const id = result?.toolUseId;
+            if (!id || !availableToolUseIds.has(id)) {
+                logger.warn(`[Kiro] Dropping orphaned current tool_result: ${id || 'unknown'}`);
+                continue;
+            }
+            if (pairedToolUseIds.has(id)) {
+                logger.warn(`[Kiro] Dropping duplicate current tool_result: ${id}`);
+                continue;
+            }
+            pairedToolUseIds.add(id);
+            filteredCurrentToolResults.push(result);
+        }
+
+        const orphanedToolUseIds = new Set(
+            [...availableToolUseIds].filter(id => !pairedToolUseIds.has(id))
+        );
+        if (orphanedToolUseIds.size > 0) {
+            logger.warn(`[Kiro] Removing ${orphanedToolUseIds.size} orphaned historical tool_use(s) without matching tool_result`);
+        }
+
+        for (const item of history) {
+            const assistant = item?.assistantResponseMessage;
+            if (!Array.isArray(assistant?.toolUses)) continue;
+
+            assistant.toolUses = assistant.toolUses.filter(toolUse => !orphanedToolUseIds.has(toolUse?.toolUseId));
+            if (assistant.toolUses.length === 0) {
+                delete assistant.toolUses;
+            }
+            if (!assistant.content || String(assistant.content).length === 0) {
+                assistant.content = ' ';
+            }
+        }
+
+        return filteredCurrentToolResults;
+    }
+
     _formatToolUseAsText(part) {
         const name = part?.name || 'unknown_tool';
         const id = part?.id ? ` ${part.id}` : '';
@@ -2176,6 +2255,7 @@ async saveCredentialsToFile(filePath, newData) {
 
         // 构建 userInputMessageContext，只包含非空字段
         const userInputMessageContext = {};
+        currentToolResults = this._reconcileKiroToolHistory(history, currentToolResults);
         if (currentToolResults.length > 0) {
             // 去重 toolResults - Kiro API 不接受重复的 toolUseId
             const uniqueToolResults = [];
