@@ -296,6 +296,329 @@ function normalizeKiroToolInput(input) {
     return String(input);
 }
 
+const AWS_EVENT_STREAM_MIN_MESSAGE_SIZE = 16;
+const AWS_EVENT_STREAM_PRELUDE_SIZE = 12;
+const AWS_EVENT_STREAM_MAX_MESSAGE_SIZE = 16 * 1024 * 1024;
+const AWS_HEADER_VALUE_TYPE = {
+    BOOL_TRUE: 0,
+    BOOL_FALSE: 1,
+    BYTE: 2,
+    SHORT: 3,
+    INTEGER: 4,
+    LONG: 5,
+    BYTE_ARRAY: 6,
+    STRING: 7,
+    TIMESTAMP: 8,
+    UUID: 9,
+};
+
+function toBuffer(value) {
+    if (Buffer.isBuffer(value)) return value;
+    if (value instanceof ArrayBuffer) return Buffer.from(value);
+    if (ArrayBuffer.isView(value)) {
+        return Buffer.from(value.buffer, value.byteOffset, value.byteLength);
+    }
+    return Buffer.from(String(value || ''), 'utf8');
+}
+
+function getKiroEventErrorMessage(event) {
+    const data = event?.data;
+    const rawError = data?.error;
+    if (!data && !rawError) {
+        return 'Kiro upstream event-stream error';
+    }
+    if (typeof rawError === 'string') {
+        return rawError;
+    }
+    if (rawError && typeof rawError === 'object') {
+        return rawError.message || rawError.errorMessage || rawError.error || JSON.stringify(rawError);
+    }
+    return data?.eventType || data?.messageType || 'Kiro upstream event-stream error';
+}
+
+function createKiroEventStreamError(event) {
+    const message = getKiroEventErrorMessage(event);
+    const error = new Error(sanitizeProviderLeakText(message));
+    error.kiroEventStreamError = true;
+    error.kiroEventStreamData = event?.data;
+    return error;
+}
+
+function isPlausibleAwsEventStreamPrelude(buffer, offset = 0) {
+    if (!Buffer.isBuffer(buffer) || buffer.length - offset < AWS_EVENT_STREAM_PRELUDE_SIZE) {
+        return false;
+    }
+
+    const totalLength = buffer.readUInt32BE(offset);
+    const headersLength = buffer.readUInt32BE(offset + 4);
+    return totalLength >= AWS_EVENT_STREAM_MIN_MESSAGE_SIZE &&
+        totalLength <= AWS_EVENT_STREAM_MAX_MESSAGE_SIZE &&
+        headersLength <= totalLength - AWS_EVENT_STREAM_MIN_MESSAGE_SIZE;
+}
+
+function readAwsHeaderValue(buffer, offset, type) {
+    switch (type) {
+        case AWS_HEADER_VALUE_TYPE.BOOL_TRUE:
+            return { value: true, nextOffset: offset };
+        case AWS_HEADER_VALUE_TYPE.BOOL_FALSE:
+            return { value: false, nextOffset: offset };
+        case AWS_HEADER_VALUE_TYPE.BYTE:
+            if (offset + 1 > buffer.length) throw new Error('Incomplete byte header value');
+            return { value: buffer.readInt8(offset), nextOffset: offset + 1 };
+        case AWS_HEADER_VALUE_TYPE.SHORT:
+            if (offset + 2 > buffer.length) throw new Error('Incomplete short header value');
+            return { value: buffer.readInt16BE(offset), nextOffset: offset + 2 };
+        case AWS_HEADER_VALUE_TYPE.INTEGER:
+            if (offset + 4 > buffer.length) throw new Error('Incomplete integer header value');
+            return { value: buffer.readInt32BE(offset), nextOffset: offset + 4 };
+        case AWS_HEADER_VALUE_TYPE.LONG:
+        case AWS_HEADER_VALUE_TYPE.TIMESTAMP:
+            if (offset + 8 > buffer.length) throw new Error('Incomplete long header value');
+            return { value: Number(buffer.readBigInt64BE(offset)), nextOffset: offset + 8 };
+        case AWS_HEADER_VALUE_TYPE.BYTE_ARRAY:
+        case AWS_HEADER_VALUE_TYPE.STRING: {
+            if (offset + 2 > buffer.length) throw new Error('Incomplete variable header length');
+            const length = buffer.readUInt16BE(offset);
+            const valueStart = offset + 2;
+            const valueEnd = valueStart + length;
+            if (valueEnd > buffer.length) throw new Error('Incomplete variable header value');
+            const raw = buffer.subarray(valueStart, valueEnd);
+            return {
+                value: type === AWS_HEADER_VALUE_TYPE.STRING ? raw.toString('utf8') : Buffer.from(raw),
+                nextOffset: valueEnd
+            };
+        }
+        case AWS_HEADER_VALUE_TYPE.UUID:
+            if (offset + 16 > buffer.length) throw new Error('Incomplete uuid header value');
+            return { value: buffer.subarray(offset, offset + 16).toString('hex'), nextOffset: offset + 16 };
+        default:
+            throw new Error(`Unsupported AWS event-stream header type: ${type}`);
+    }
+}
+
+function parseAwsEventStreamHeaders(headersBuffer) {
+    const headers = {};
+    let offset = 0;
+
+    while (offset < headersBuffer.length) {
+        const nameLength = headersBuffer[offset];
+        offset += 1;
+        if (!nameLength) throw new Error('Invalid AWS event-stream header name length');
+        if (offset + nameLength > headersBuffer.length) throw new Error('Incomplete AWS event-stream header name');
+
+        const name = headersBuffer.subarray(offset, offset + nameLength).toString('utf8');
+        offset += nameLength;
+        if (offset >= headersBuffer.length) throw new Error('Missing AWS event-stream header type');
+
+        const type = headersBuffer[offset];
+        offset += 1;
+        const parsed = readAwsHeaderValue(headersBuffer, offset, type);
+        headers[name] = parsed.value;
+        offset = parsed.nextOffset;
+    }
+
+    return headers;
+}
+
+function normalizeKiroParsedEvent(parsed, eventType = null, messageType = 'event') {
+    const events = [];
+    if (!parsed || typeof parsed !== 'object') {
+        return events;
+    }
+
+    if (messageType === 'error' || messageType === 'exception') {
+        events.push({
+            type: 'error',
+            data: {
+                messageType,
+                eventType,
+                error: parsed
+            }
+        });
+        return events;
+    }
+
+    if ((eventType === 'assistantResponseEvent' || parsed.content !== undefined) && !parsed.followupPrompt) {
+        if (parsed.content !== undefined) {
+            events.push({ type: 'content', data: parsed.content });
+        }
+    } else if (eventType === 'toolUseEvent' || parsed.name || parsed.toolUseId || parsed.input !== undefined) {
+        if (parsed.name && parsed.toolUseId) {
+            events.push({
+                type: 'toolUse',
+                data: {
+                    name: parsed.name,
+                    toolUseId: parsed.toolUseId,
+                    input: normalizeKiroToolInput(parsed.input),
+                    stop: parsed.stop || false
+                }
+            });
+        } else if (parsed.input !== undefined) {
+            events.push({
+                type: 'toolUseInput',
+                data: {
+                    toolUseId: parsed.toolUseId,
+                    input: normalizeKiroToolInput(parsed.input)
+                }
+            });
+            if (parsed.stop === true) {
+                events.push({
+                    type: 'toolUseStop',
+                    data: {
+                        toolUseId: parsed.toolUseId,
+                        stop: true
+                    }
+                });
+            }
+        } else if (parsed.stop === true) {
+            events.push({
+                type: 'toolUseStop',
+                data: {
+                    toolUseId: parsed.toolUseId,
+                    stop: true
+                }
+            });
+        }
+    } else if (eventType === 'contextUsageEvent' || parsed.contextUsagePercentage !== undefined) {
+        if (parsed.contextUsagePercentage !== undefined) {
+            events.push({
+                type: 'contextUsage',
+                data: {
+                    contextUsagePercentage: parsed.contextUsagePercentage
+                }
+            });
+        }
+    }
+
+    return events;
+}
+
+function parseAwsEventStreamPayload(payloadBuffer, headers) {
+    const messageType = headers[':message-type'] || 'event';
+    const eventType = headers[':event-type'] || null;
+    const payloadText = payloadBuffer.toString('utf8');
+
+    if (!payloadText.trim()) {
+        return [];
+    }
+
+    if (messageType === 'error' || messageType === 'exception') {
+        let errorPayload = payloadText;
+        try {
+            errorPayload = JSON.parse(payloadText);
+        } catch {}
+        return [{
+            type: 'error',
+            data: {
+                messageType,
+                eventType: eventType || headers[':exception-type'] || headers[':error-code'] || null,
+                error: errorPayload
+            }
+        }];
+    }
+
+    try {
+        return normalizeKiroParsedEvent(JSON.parse(payloadText), eventType, messageType);
+    } catch (error) {
+        logger.warn(`[Kiro] Failed to parse AWS event-stream payload JSON (${eventType || messageType}): ${error.message}`);
+        return [];
+    }
+}
+
+function parseAwsEventStreamFrames(buffer, { recover = false } = {}) {
+    const source = toBuffer(buffer);
+    const events = [];
+    let offset = 0;
+    let recognized = false;
+
+    while (offset < source.length) {
+        if (source.length - offset < AWS_EVENT_STREAM_PRELUDE_SIZE) {
+            break;
+        }
+
+        const totalLength = source.readUInt32BE(offset);
+        const headersLength = source.readUInt32BE(offset + 4);
+        const validPrelude = totalLength >= AWS_EVENT_STREAM_MIN_MESSAGE_SIZE &&
+            totalLength <= AWS_EVENT_STREAM_MAX_MESSAGE_SIZE &&
+            headersLength <= totalLength - AWS_EVENT_STREAM_MIN_MESSAGE_SIZE;
+
+        if (!validPrelude) {
+            if (!recover) {
+                break;
+            }
+            offset += 1;
+            continue;
+        }
+
+        recognized = true;
+        if (source.length - offset < totalLength) {
+            break;
+        }
+
+        const headersStart = offset + AWS_EVENT_STREAM_PRELUDE_SIZE;
+        const headersEnd = headersStart + headersLength;
+        const payloadEnd = offset + totalLength - 4;
+
+        try {
+            const headers = parseAwsEventStreamHeaders(source.subarray(headersStart, headersEnd));
+            const payload = source.subarray(headersEnd, payloadEnd);
+            events.push(...parseAwsEventStreamPayload(payload, headers));
+            offset += totalLength;
+        } catch (error) {
+            logger.warn(`[Kiro] Failed to decode AWS event-stream frame: ${error.message}`);
+            if (!recover) {
+                offset += totalLength;
+            } else {
+                offset += 1;
+            }
+        }
+    }
+
+    return {
+        events,
+        remaining: source.subarray(offset),
+        recognized
+    };
+}
+
+class KiroAwsEventStreamDecoder {
+    constructor() {
+        this.buffer = Buffer.alloc(0);
+    }
+
+    feed(chunk) {
+        const incoming = toBuffer(chunk);
+        this.buffer = this.buffer.length > 0 ? Buffer.concat([this.buffer, incoming]) : incoming;
+        if (this.buffer.length > AWS_EVENT_STREAM_MAX_MESSAGE_SIZE) {
+            throw new Error(`AWS event-stream buffer overflow (${this.buffer.length} bytes)`);
+        }
+
+        if (this.buffer.length >= AWS_EVENT_STREAM_PRELUDE_SIZE &&
+            !isPlausibleAwsEventStreamPrelude(this.buffer, 0)) {
+            return { events: [], remaining: this.buffer, recognized: false };
+        }
+
+        const parsed = parseAwsEventStreamFrames(this.buffer, { recover: false });
+        this.buffer = parsed.remaining;
+        return parsed;
+    }
+
+    finish() {
+        if (!this.buffer.length) {
+            return { events: [], remaining: Buffer.alloc(0), recognized: false };
+        }
+        if (!isPlausibleAwsEventStreamPrelude(this.buffer, 0)) {
+            const remaining = this.buffer;
+            this.buffer = Buffer.alloc(0);
+            return { events: [], remaining, recognized: false };
+        }
+
+        const parsed = parseAwsEventStreamFrames(this.buffer, { recover: false });
+        this.buffer = Buffer.alloc(0);
+        return parsed;
+    }
+}
+
 // Per-model context window sizes for accurate token estimation
 const MODEL_CONTEXT_TOKENS = {
     "claude-opus-4-7": 1000000,
@@ -369,6 +692,10 @@ function resolveKiroModel(model) {
 function isInvalidKiroModelError(error) {
     const data = error?.response?.data;
     if (data?.reason === 'INVALID_MODEL_ID') return true;
+    if (Buffer.isBuffer(data) || data instanceof ArrayBuffer || ArrayBuffer.isView(data)) {
+        const text = toBuffer(data).toString('utf8');
+        return text.includes('INVALID_MODEL_ID') || text.includes('Invalid model ID');
+    }
     if (typeof data === 'string') {
         return data.includes('INVALID_MODEL_ID') || data.includes('Invalid model ID');
     }
@@ -2314,14 +2641,18 @@ async saveCredentialsToFile(filePath, newData) {
     }
 
     parseEventStreamChunk(rawData, toolNameMaps = null) {
-        const rawStr = Buffer.isBuffer(rawData) ? rawData.toString('utf8') : String(rawData);
+        const rawBuffer = toBuffer(rawData);
+        const rawStr = rawBuffer.toString('utf8');
         let fullContent = '';
         const toolCalls = [];
 
         // 复用流式解析器：brace-counting 会枚举整条响应里所有 JSON payload，
         // 不像旧的正则 "break-on-first-match" 那样漏掉同一事件块里的后续对象；
         // 同时原生支持 toolUseInput / toolUseStop 续传事件，避免参数被截断。
-        const { events } = this.parseAwsEventStreamBuffer(rawStr);
+        let { events, recognized } = this.parseAwsEventStreamBuffer(rawBuffer);
+        if (!recognized && events.length === 0) {
+            events = this.parseAwsEventStreamBuffer(rawStr).events;
+        }
 
         const pendingByToolUseId = new Map();
         const orderedToolUseIds = [];
@@ -2355,7 +2686,9 @@ async saveCredentialsToFile(filePath, newData) {
         };
 
         for (const ev of events) {
-            if (ev.type === 'content') {
+            if (ev.type === 'error') {
+                throw createKiroEventStreamError(ev);
+            } else if (ev.type === 'content') {
                 if (ev.data) fullContent += ev.data;
             } else if (ev.type === 'toolUse') {
                 const { toolUseId, name, input, stop } = ev.data || {};
@@ -2457,7 +2790,8 @@ async saveCredentialsToFile(filePath, newData) {
                 method: 'post',
                 url: requestUrl,
                 data: requestData,
-                headers
+                headers,
+                responseType: 'arraybuffer'
             };
             this._applySidecar(axiosConfig);
             const releaseThrottle = await acquireKiroRequestSlot(this.config);
@@ -2553,7 +2887,9 @@ async saveCredentialsToFile(filePath, newData) {
                 return this.callApi(method, model, body, isRetry, retryCount + 1, requestContext);
             }
 
-            if (error.response && error.response.data) { logger.error('[Kiro] 400 Response body:', typeof error.response.data === 'string' ? error.response.data.substring(0, 500) : JSON.stringify(error.response.data).substring(0, 500)); }
+            if (error.response && error.response.data) {
+                logger.error('[Kiro] Response body:', this._getErrorResponseText(error).substring(0, 500));
+            }
             logger.error(`[Kiro] API call failed (Status: ${status}, Code: ${errorCode}):`, sanitizeProviderLeakText(error.message));
             throw error;
         }
@@ -2564,8 +2900,8 @@ async saveCredentialsToFile(filePath, newData) {
         if (data === undefined || data === null) {
             return sanitizeProviderLeakText(error?.message || '');
         }
-        if (Buffer.isBuffer(data)) {
-            return sanitizeProviderLeakText(data.toString('utf8'));
+        if (Buffer.isBuffer(data) || data instanceof ArrayBuffer || ArrayBuffer.isView(data)) {
+            return sanitizeProviderLeakText(toBuffer(data).toString('utf8'));
         }
         if (typeof data === 'string') {
             return sanitizeProviderLeakText(data);
@@ -2766,14 +3102,15 @@ async saveCredentialsToFile(filePath, newData) {
 
     _processApiResponse(response) {
         const toolNameMaps = response?._kiroToolNameMaps;
-        const rawResponseText = Buffer.isBuffer(response.data) ? response.data.toString('utf8') : String(response.data);
+        const rawResponseBuffer = toBuffer(response.data);
+        const rawResponseText = rawResponseBuffer.toString('utf8');
         //logger.info(`[Kiro] Raw response length: ${rawResponseText.length}`);
         if (rawResponseText.includes("[Called")) {
             logger.info("[Kiro] Raw response contains [Called marker.");
         }
 
         // 1. Parse structured events and bracket calls from parsed content
-        const parsedFromEvents = this.parseEventStreamChunk(rawResponseText, toolNameMaps);
+        const parsedFromEvents = this.parseEventStreamChunk(rawResponseBuffer, toolNameMaps);
         let fullResponseText = parsedFromEvents.content;
         let allToolCalls = [...parsedFromEvents.toolCalls]; // clone
         //logger.info(`[Kiro] Found ${allToolCalls.length} tool calls from event stream parsing.`);
@@ -2958,6 +3295,19 @@ async saveCredentialsToFile(filePath, newData) {
      * 返回 { events: 解析出的事件数组, remaining: 未处理完的缓冲区 }
      */
     parseAwsEventStreamBuffer(buffer) {
+        const binarySource = Buffer.isBuffer(buffer) || buffer instanceof ArrayBuffer || ArrayBuffer.isView(buffer);
+        if (binarySource) {
+            const sourceBuffer = toBuffer(buffer);
+            if (!isPlausibleAwsEventStreamPrelude(sourceBuffer, 0)) {
+                return { events: [], remaining: sourceBuffer, recognized: false };
+            }
+
+            const parsedFrames = parseAwsEventStreamFrames(sourceBuffer, { recover: false });
+            if (parsedFrames.recognized) {
+                return parsedFrames;
+            }
+        }
+
         const events = [];
         const source = Buffer.isBuffer(buffer) ? buffer.toString('utf8') : String(buffer || '');
         let searchStart = 0;
@@ -3157,20 +3507,30 @@ async saveCredentialsToFile(filePath, newData) {
             const response = await this.axiosInstance.request(axiosConfig);
 
             stream = response.data;
-            let buffer = '';
+            const decoder = new KiroAwsEventStreamDecoder();
+            let textFallbackBuffer = '';
             let lastContentEvent = null;  // 用于检测连续重复的 content 事件
             let lastContentRepeatCount = 0; // 连续重复计数
 
             for await (const chunk of stream) {
-                buffer += chunk.toString();
-
-                // 解析缓冲区中的事件
-                const { events, remaining } = this.parseAwsEventStreamBuffer(buffer);
-                buffer = remaining;
+                const parsedStream = decoder.feed(chunk);
+                let events = parsedStream.events;
+                if (!parsedStream.recognized &&
+                    parsedStream.remaining?.length >= AWS_EVENT_STREAM_PRELUDE_SIZE &&
+                    !isPlausibleAwsEventStreamPrelude(parsedStream.remaining, 0)) {
+                    textFallbackBuffer += parsedStream.remaining.toString('utf8');
+                    decoder.buffer = Buffer.alloc(0);
+                    const parsedText = this.parseAwsEventStreamBuffer(textFallbackBuffer);
+                    events = parsedText.events;
+                    textFallbackBuffer = parsedText.remaining;
+                }
 
                 // yield 所有事件，但过滤连续完全相同的 content 事件（Kiro API 有时会重复发送）
                 // 只跳过连续重复超过 2 次的相同内容，避免误杀合法重复
                 for (const event of events) {
+                    if (event.type === 'error') {
+                        throw createKiroEventStreamError(event);
+                    }
                     if (event.type === 'content' && event.data) {
                         // NOTE: followupPrompt events are already filtered in parseAwsEventStreamBuffer
                         // (line ~2289: !parsed.followupPrompt). No additional check needed here.
@@ -3216,9 +3576,21 @@ async saveCredentialsToFile(filePath, newData) {
                 }
             }
             // Flush any remaining buffer data after stream ends (handles split chunks)
-            if (buffer.trim()) {
-                const { events: remainingEvents } = this.parseAwsEventStreamBuffer(buffer);
+            {
+                const finishedStream = decoder.finish();
+                let remainingEvents = finishedStream.events;
+                if (!finishedStream.recognized && finishedStream.remaining?.length) {
+                    textFallbackBuffer += finishedStream.remaining.toString('utf8');
+                }
+                if (textFallbackBuffer) {
+                    const parsedText = this.parseAwsEventStreamBuffer(textFallbackBuffer);
+                    remainingEvents = remainingEvents.concat(parsedText.events);
+                    textFallbackBuffer = parsedText.remaining;
+                }
                 for (const event of remainingEvents) {
+                    if (event.type === 'error') {
+                        throw createKiroEventStreamError(event);
+                    }
                     if (event.type === 'content' && event.data) {
                         yield { type: 'content', content: event.data };
                     } else if (event.type === 'toolUse') {
