@@ -1,13 +1,13 @@
 import { CONFIG } from '../core/config-manager.js';
 import logger from '../utils/logger.js';
 import { serviceInstances, getServiceAdapter } from '../providers/adapter.js';
-import { formatKiroUsage, formatGeminiUsage, formatAntigravityUsage, formatCodexUsage, formatGrokUsage } from '../services/usage-service.js';
+import { formatKiroUsage, formatGeminiUsage, formatAntigravityUsage, formatCodexUsage, formatGrokUsage, formatDeepSeekUsage } from '../services/usage-service.js';
 import { readUsageCache, writeUsageCache, readProviderUsageCache, updateProviderUsageCache } from './usage-cache.js';
 import { PROVIDER_MAPPINGS } from '../utils/provider-utils.js';
 import path from 'path';
 import { existsSync, readFileSync } from 'fs';
 
-const supportedProviders = ['claude-kiro-oauth', 'gemini-cli-oauth', 'gemini-antigravity', 'openai-codex-oauth', 'grok-web'];
+const supportedProviders = ['claude-kiro-oauth', 'gemini-cli-oauth', 'gemini-antigravity', 'openai-codex-oauth', 'grok-web', 'DeepSeek'];
 
 
 /**
@@ -214,6 +214,17 @@ async function getAdapterUsage(adapter, providerType) {
         if (typeof adapter.getUsageLimits === 'function') {
             const rawUsage = await adapter.getUsageLimits();
             return formatGrokUsage(rawUsage);
+        }
+        throw new Error('This adapter does not support usage query');
+    }
+
+    if (providerType === 'DeepSeek') {
+        if (typeof adapter.getUsageLimits === 'function') {
+            const rawUsage = await adapter.getUsageLimits();
+            return formatDeepSeekUsage(rawUsage);
+        } else if (adapter.deepSeekApiService && typeof adapter.deepSeekApiService.getUsageLimits === 'function') {
+            const rawUsage = await adapter.deepSeekApiService.getUsageLimits();
+            return formatDeepSeekUsage(rawUsage);
         }
         throw new Error('This adapter does not support usage query');
     }

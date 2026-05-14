@@ -492,7 +492,7 @@ function createInstanceUsageCard(instance, providerType) {
 
     const displayUsageText = totalUsage.isCodex 
         ? `${totalUsage.percent.toFixed(1)}%`
-        : `${formatNumber(totalUsage.used)} / ${formatNumber(totalUsage.limit)}`;
+        : (totalUsage.isBalance ? formatCurrency(totalUsage.limit, totalUsage.currency) : `${formatNumber(totalUsage.used)} / ${formatNumber(totalUsage.limit)}`);
     
     collapsedSummary.innerHTML = `
         <div class="collapsed-summary-row collapsed-summary-name-row">
@@ -505,10 +505,10 @@ function createInstanceUsageCard(instance, providerType) {
         ${showUsage ? `
         <div class="collapsed-summary-row collapsed-summary-usage-row">
             ${totalUsage.hasData ? `
-                <div class="collapsed-progress-bar ${progressClass}">
+                ${totalUsage.isBalance ? '' : `<div class="collapsed-progress-bar ${progressClass}">
                     <div class="progress-fill" style="width: ${totalUsage.percent}%"></div>
-                </div>
-                <span class="collapsed-percent">${totalUsage.percent.toFixed(1)}%</span>
+                </div>`}
+                ${totalUsage.isBalance ? '' : `<span class="collapsed-percent">${totalUsage.percent.toFixed(1)}%</span>`}
                 <span class="collapsed-usage-text">${displayUsageText}</span>
             ` : (instance.error ? `<span class="collapsed-error" data-i18n="common.error">${t('common.error')}</span>` : '')}
         </div>
@@ -708,6 +708,10 @@ function createUsageBreakdownHTML(breakdown, providerType) {
         return createCodexUsageBreakdownHTML(breakdown);
     }
 
+    if (breakdown.isBalance) {
+        return createBalanceBreakdownHTML(breakdown);
+    }
+
     // 检查是否应该显示用量信息
     const showUsage = shouldShowUsage(providerType);
 
@@ -793,6 +797,32 @@ function createUsageBreakdownHTML(breakdown, providerType) {
  * @param {Object} breakdown - 包含 rateLimit 的用量明细
  * @returns {string} HTML 字符串
  */
+function createBalanceBreakdownHTML(breakdown) {
+    const availableText = breakdown.isAvailable ? t('usage.balance.available') : t('usage.balance.unavailable');
+    const grantedBalance = Number(breakdown.grantedBalance || 0);
+    const toppedUpBalance = Number(breakdown.toppedUpBalance || 0);
+
+    return `
+        <div class="breakdown-item-compact">
+            <div class="breakdown-header-compact">
+                <span class="breakdown-name">${breakdown.displayName || 'Available Balance'}</span>
+                <span class="breakdown-usage">${formatCurrency(breakdown.totalBalance, breakdown.currency)}</span>
+            </div>
+            <div class="extra-usage-info">
+                <span class="extra-label"><i class="fas fa-circle-check"></i> ${availableText}</span>
+            </div>
+            <div class="extra-usage-info">
+                <span class="extra-label"><i class="fas fa-gift"></i> ${t('usage.balance.granted')}</span>
+                <span class="extra-value">${formatCurrency(grantedBalance, breakdown.currency)}</span>
+            </div>
+            <div class="extra-usage-info">
+                <span class="extra-label"><i class="fas fa-wallet"></i> ${t('usage.balance.toppedUp')}</span>
+                <span class="extra-value">${formatCurrency(toppedUpBalance, breakdown.currency)}</span>
+            </div>
+        </div>
+    `;
+}
+
 function createCodexUsageBreakdownHTML(breakdown) {
     const rl = breakdown.rateLimit;
     const secondary = rl.secondary_window;
@@ -870,6 +900,19 @@ function calculateTotalUsage(usageBreakdown) {
         // 如果未达到 100%，则继续执行下面的常规计算逻辑
     }
 
+    const balanceEntries = usageBreakdown.filter(b => b.isBalance);
+    if (balanceEntries.length > 0) {
+        const totalBalance = balanceEntries.reduce((sum, item) => sum + Number(item.totalBalance || item.usageLimit || 0), 0);
+        return {
+            hasData: true,
+            used: 0,
+            limit: totalBalance,
+            percent: 0,
+            isBalance: true,
+            currency: balanceEntries[0].currency || balanceEntries[0].unit || ''
+        };
+    }
+
     let totalUsed = 0;
     let totalLimit = 0;
 
@@ -925,7 +968,8 @@ function getProviderDisplayName(providerType) {
         'gemini-antigravity': 'Gemini Antigravity',
         'openai-codex-oauth': 'Codex OAuth',
         'openai-qwen-oauth': 'Qwen OAuth',
-        'grok-web': 'Grok Web'
+        'grok-web': 'Grok Web',
+        'DeepSeek': 'DeepSeek'
     };
     return names[providerType] || providerType;
 }
@@ -951,7 +995,8 @@ function getProviderIcon(providerType) {
         'gemini-antigravity': 'fas fa-rocket',
         'openai-codex-oauth': 'fas fa-terminal',
         'openai-qwen-oauth': 'fas fa-code',
-        'grok-web': 'fas fa-brain'
+        'grok-web': 'fas fa-brain',
+        'DeepSeek': 'fas fa-water'
     };
     return icons[providerType] || 'fas fa-server';
 }
@@ -1009,6 +1054,11 @@ function formatNumber(num) {
  * @param {string} dateStr - ISO 日期字符串
  * @returns {string} 格式化后的日期
  */
+function formatCurrency(amount, currency = '') {
+    const value = formatNumber(Number(amount || 0));
+    return currency ? `${value} ${currency}` : value;
+}
+
 function formatDate(dateStr) {
     if (!dateStr) return '--';
     try {

@@ -3,6 +3,32 @@ import logger from '../../utils/logger.js';
 
 const DEEPSEEK_BASE_URL = 'https://api.deepseek.com';
 
+function normalizeDeepSeekApiKey(apiKey) {
+    return String(apiKey || '').trim().replace(/^Bearer\s+/i, '');
+}
+
+function normalizeDeepSeekBaseUrl(baseUrl) {
+    return String(baseUrl || DEEPSEEK_BASE_URL).trim().replace(/\/+$/, '');
+}
+
+function throwReadableDeepSeekError(error) {
+    const status = error.response?.status;
+    const upstreamMessage = error.response?.data?.error?.message
+        || error.response?.data?.message
+        || error.message;
+
+    if (status === 401 || status === 403) {
+        const readableError = new Error(
+            `DeepSeek authentication failed (${status}). 请检查 DeepSeek API Key 是否正确、未过期、未误填 Bearer 前缀，并确认该账号有 API 权限。${upstreamMessage ? ` Upstream: ${upstreamMessage}` : ''}`
+        );
+        readableError.status = status;
+        readableError.cause = error;
+        throw readableError;
+    }
+
+    throw error;
+}
+
 function stringifyContentPart(part) {
     if (part === null || part === undefined) {
         return '';
@@ -95,25 +121,35 @@ export function normalizeDeepSeekChatRequest(requestBody = {}) {
 
 export class DeepSeekApiService extends OpenAIApiService {
     constructor(config) {
-        if (!config.DEEPSEEK_API_KEY) {
+        const apiKey = normalizeDeepSeekApiKey(config.DEEPSEEK_API_KEY);
+        if (!apiKey) {
             throw new Error("DeepSeek API Key is required for DeepSeekApiService.");
         }
         // Map DeepSeek credentials into the OpenAI-compatible service shape.
         const deepseekConfig = {
             ...config,
-            OPENAI_API_KEY: config.DEEPSEEK_API_KEY,
-            OPENAI_BASE_URL: config.DEEPSEEK_BASE_URL || DEEPSEEK_BASE_URL,
+            DEEPSEEK_API_KEY: apiKey,
+            OPENAI_API_KEY: apiKey,
+            OPENAI_BASE_URL: normalizeDeepSeekBaseUrl(config.DEEPSEEK_BASE_URL),
         };
         super(deepseekConfig);
         logger.info(`[DeepSeek] Initialized with base URL: ${deepseekConfig.OPENAI_BASE_URL}`);
     }
 
     async generateContent(model, requestBody) {
-        return super.generateContent(model, normalizeDeepSeekChatRequest(requestBody));
+        try {
+            return await super.generateContent(model, normalizeDeepSeekChatRequest(requestBody));
+        } catch (error) {
+            throwReadableDeepSeekError(error);
+        }
     }
 
     async *generateContentStream(model, requestBody) {
-        yield* super.generateContentStream(model, normalizeDeepSeekChatRequest(requestBody));
+        try {
+            yield* super.generateContentStream(model, normalizeDeepSeekChatRequest(requestBody));
+        } catch (error) {
+            throwReadableDeepSeekError(error);
+        }
     }
 
     async listModels() {
@@ -130,6 +166,16 @@ export class DeepSeekApiService extends OpenAIApiService {
                     { id: 'deepseek-v4-pro', object: 'model', owned_by: 'deepseek' },
                 ]
             };
+        }
+    }
+
+    async getUsageLimits() {
+        try {
+            const response = await this.axiosInstance.get('/user/balance');
+            return response.data;
+        } catch (error) {
+            logger.error('[DeepSeek] Failed to get user balance:', error.message);
+            throwReadableDeepSeekError(error);
         }
     }
 }

@@ -19,6 +19,7 @@ export class UsageService {
             [MODEL_PROVIDER.ANTIGRAVITY]: this.getAntigravityUsage.bind(this),
             [MODEL_PROVIDER.CODEX_API]: this.getCodexUsage.bind(this),
             [MODEL_PROVIDER.GROK_WEB]: this.getGrokUsage.bind(this),
+            [MODEL_PROVIDER.DEEPSEEK_API]: this.getDeepSeekUsage.bind(this),
         };
     }
 
@@ -213,6 +214,27 @@ export class UsageService {
 
      * @returns {Array<string>} 支持的提供商类型列表
      */
+    async getDeepSeekUsage(uuid = null) {
+        const providerKey = uuid ? MODEL_PROVIDER.DEEPSEEK_API + uuid : MODEL_PROVIDER.DEEPSEEK_API;
+        const adapter = serviceInstances[providerKey];
+
+        if (!adapter) {
+            throw new Error(`DeepSeek service instance not found: ${providerKey}`);
+        }
+
+        if (typeof adapter.getUsageLimits === 'function') {
+            const rawUsage = await adapter.getUsageLimits();
+            return formatDeepSeekUsage(rawUsage);
+        }
+
+        if (adapter.deepSeekApiService && typeof adapter.deepSeekApiService.getUsageLimits === 'function') {
+            const rawUsage = await adapter.deepSeekApiService.getUsageLimits();
+            return formatDeepSeekUsage(rawUsage);
+        }
+
+        throw new Error(`DeepSeek service instance does not support usage query: ${providerKey}`);
+    }
+
     getSupportedProviders() {
         return Object.keys(this.providerHandlers);
     }
@@ -612,6 +634,70 @@ export function formatGrokUsage(usageData) {
  * @param {Object} usageData - 原始用量数据
  * @returns {Object} 格式化后的用量信息
  */
+export function formatDeepSeekUsage(usageData) {
+    if (!usageData) {
+        return null;
+    }
+
+    const balanceInfos = Array.isArray(usageData.balance_infos) ? usageData.balance_infos : [];
+    const result = {
+        daysUntilReset: null,
+        nextDateReset: null,
+        subscription: {
+            title: usageData.is_available ? 'DeepSeek API' : 'DeepSeek API (Unavailable)',
+            type: 'DeepSeek',
+            upgradeCapability: null,
+            overageCapability: null
+        },
+        user: {
+            email: null,
+            userId: null
+        },
+        usageBreakdown: []
+    };
+
+    for (const balance of balanceInfos) {
+        const currency = balance.currency || 'CNY';
+        const totalBalance = Number(balance.total_balance ?? 0);
+        const grantedBalance = Number(balance.granted_balance ?? 0);
+        const toppedUpBalance = Number(balance.topped_up_balance ?? 0);
+
+        result.usageBreakdown.push({
+            resourceType: 'BALANCE',
+            displayName: `Available Balance (${currency})`,
+            displayNamePlural: `Available Balance (${currency})`,
+            unit: currency,
+            currency,
+            currentUsage: 0,
+            usageLimit: totalBalance,
+            nextDateReset: null,
+            freeTrial: grantedBalance > 0 ? {
+                status: 'ACTIVE',
+                currentUsage: 0,
+                usageLimit: grantedBalance,
+                expiresAt: null
+            } : null,
+            bonuses: toppedUpBalance > 0 ? [{
+                code: 'TOPPED_UP_BALANCE',
+                displayName: 'Topped-up Balance',
+                description: null,
+                status: 'ACTIVE',
+                currentUsage: 0,
+                usageLimit: toppedUpBalance,
+                redeemedAt: null,
+                expiresAt: null
+            }] : [],
+            isBalance: true,
+            isAvailable: usageData.is_available !== false,
+            totalBalance,
+            grantedBalance,
+            toppedUpBalance
+        });
+    }
+
+    return result;
+}
+
 export function formatCodexUsage(usageData) {
     if (!usageData) {
         return null;

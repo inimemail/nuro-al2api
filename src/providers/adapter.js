@@ -720,6 +720,10 @@ export class DeepSeekApiServiceAdapter extends ApiServiceAdapter {
         return this.deepSeekApiService.listModels();
     }
 
+    async getUsageLimits() {
+        return this.deepSeekApiService.getUsageLimits();
+    }
+
     async refreshToken() {
         return false;
     }
