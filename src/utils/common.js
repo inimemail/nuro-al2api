@@ -408,6 +408,30 @@ export function getProtocolPrefix(provider) {
     return provider; // Return original if no hyphen is found
 }
 
+function isDeepSeekProviderType(provider) {
+    if (typeof provider !== 'string') {
+        return false;
+    }
+
+    const lowerProvider = provider.toLowerCase();
+    return provider === MODEL_PROVIDER.DEEPSEEK_API ||
+        lowerProvider === 'deepseek' ||
+        lowerProvider === 'openai-deepseek' ||
+        lowerProvider.startsWith(`${MODEL_PROVIDER.DEEPSEEK_API.toLowerCase()}-`) ||
+        lowerProvider.startsWith('openai-deepseek-');
+}
+
+function getDeepSeekClientCacheNamespace(req) {
+    return crypto.createHash('sha256')
+        .update([
+            getClientIp(req) || '',
+            req.headers?.authorization || '',
+            req.headers?.['x-api-key'] || '',
+            req.headers?.['x-goog-api-key'] || ''
+        ].join('|'))
+        .digest('hex');
+}
+
 export const ENDPOINT_TYPE = {
     OPENAI_CHAT: 'openai_chat',
     OPENAI_RESPONSES: 'openai_responses',
@@ -1497,11 +1521,11 @@ export async function handleContentGenerationRequest(req, res, service, endpoint
         processedRequestBody._monitorRequestId = CONFIG._monitorRequestId;
     }
 
-    if (CONFIG._clientCacheNamespace) {
-        processedRequestBody._clientCacheNamespace = CONFIG._clientCacheNamespace;
-    }
-    
     // 将 requestBaseUrl 注入到 requestBody 中，以便在转换器中使用
+    if (isDeepSeekProviderType(toProvider)) {
+        processedRequestBody._clientCacheNamespace = getDeepSeekClientCacheNamespace(req);
+    }
+
     if (CONFIG.requestBaseUrl) {
         processedRequestBody._requestBaseUrl = CONFIG.requestBaseUrl;
     }
