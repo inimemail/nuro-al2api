@@ -661,24 +661,14 @@ export function formatDeepSeekUsage(usageData) {
         const remainingBalance = Number(balance.total_balance ?? 0);
         const grantedBalance = Number(balance.granted_balance ?? 0);
         const toppedUpBalance = Number(balance.topped_up_balance ?? 0);
-        const usedBalance = Number(
-            balance.used_balance ??
-            balance.used_amount ??
-            balance.monthly_usage ??
-            balance.consumed_balance ??
-            balance.consumed_amount ??
-            0
-        );
-        const totalBalance = usedBalance + remainingBalance;
-
         result.usageBreakdown.push({
             resourceType: 'BALANCE',
-            displayName: `Balance Usage (${currency})`,
-            displayNamePlural: `Balance Usage (${currency})`,
+            displayName: `Available Balance (${currency})`,
+            displayNamePlural: `Available Balance (${currency})`,
             unit: currency,
             currency,
-            currentUsage: usedBalance,
-            usageLimit: totalBalance,
+            currentUsage: remainingBalance,
+            usageLimit: remainingBalance,
             nextDateReset: null,
             freeTrial: grantedBalance > 0 ? {
                 status: 'ACTIVE',
@@ -699,8 +689,7 @@ export function formatDeepSeekUsage(usageData) {
             isBalance: true,
             isAvailable: usageData.is_available !== false,
             remainingBalance,
-            usedBalance,
-            totalBalance,
+            totalBalance: remainingBalance,
             grantedBalance,
             toppedUpBalance
         });

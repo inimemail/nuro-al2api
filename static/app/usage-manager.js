@@ -490,7 +490,9 @@ function createInstanceUsageCard(instance, providerType) {
     // 显示名称：优先自定义名称，其次 uuid
     const displayName = instance.name || instance.uuid;
 
-    const displayUsageText = totalUsage.isCodex 
+    const displayUsageText = totalUsage.isBalance
+        ? (totalUsage.displayText || formatCurrency(totalUsage.remaining, totalUsage.currency))
+        : totalUsage.isCodex 
         ? `${totalUsage.percent.toFixed(1)}%`
         : `${formatNumber(totalUsage.used)} / ${formatCurrency(totalUsage.limit, totalUsage.currency)}`;
     
@@ -505,10 +507,12 @@ function createInstanceUsageCard(instance, providerType) {
         ${showUsage ? `
         <div class="collapsed-summary-row collapsed-summary-usage-row">
             ${totalUsage.hasData ? `
-                <div class="collapsed-progress-bar ${progressClass}">
-                    <div class="progress-fill" style="width: ${totalUsage.percent}%"></div>
-                </div>
-                <span class="collapsed-percent">${totalUsage.percent.toFixed(1)}%</span>
+                ${totalUsage.isBalance ? '' : `
+                    <div class="collapsed-progress-bar ${progressClass}">
+                        <div class="progress-fill" style="width: ${totalUsage.percent}%"></div>
+                    </div>
+                    <span class="collapsed-percent">${totalUsage.percent.toFixed(1)}%</span>
+                `}
                 <span class="collapsed-usage-text">${displayUsageText}</span>
             ` : (instance.error ? `<span class="collapsed-error" data-i18n="common.error">${t('common.error')}</span>` : '')}
         </div>
@@ -627,7 +631,7 @@ function renderUsageDetails(usage, providerType) {
     const totalUsage = calculateTotalUsage(usage.usageBreakdown);
     
     // 总用量进度条（不支持显示用量的提供商不显示）
-    if (totalUsage.hasData && showUsage) {
+    if (totalUsage.hasData && showUsage && !totalUsage.isBalance) {
         const totalSection = document.createElement('div');
         totalSection.className = 'usage-section total-usage';
         
@@ -800,10 +804,6 @@ function createUsageBreakdownHTML(breakdown, providerType) {
 function createBalanceBreakdownHTML(breakdown) {
     const availableText = breakdown.isAvailable ? t('usage.balance.available') : t('usage.balance.unavailable');
     const remainingBalance = Number(breakdown.remainingBalance ?? breakdown.totalBalance ?? breakdown.usageLimit ?? 0);
-    const usedBalance = Number(breakdown.usedBalance ?? 0);
-    const totalBalance = usedBalance + remainingBalance;
-    const percent = totalBalance > 0 ? Math.min(100, (usedBalance / totalBalance) * 100) : 0;
-    const progressClass = percent >= 90 ? 'danger' : (percent >= 70 ? 'warning' : 'normal');
     const grantedBalance = Number(breakdown.grantedBalance || 0);
     const toppedUpBalance = Number(breakdown.toppedUpBalance || 0);
 
@@ -811,10 +811,7 @@ function createBalanceBreakdownHTML(breakdown) {
         <div class="breakdown-item-compact">
             <div class="breakdown-header-compact">
                 <span class="breakdown-name">${breakdown.displayName || 'Available Balance'}</span>
-                <span class="breakdown-usage">${formatNumber(usedBalance)} / ${formatCurrency(totalBalance, breakdown.currency)}</span>
-            </div>
-            <div class="progress-bar-small ${progressClass}">
-                <div class="progress-fill" style="width: ${percent}%"></div>
+                <span class="breakdown-usage">${formatCurrency(remainingBalance, breakdown.currency)}</span>
             </div>
             <div class="extra-usage-info">
                 <span class="extra-label"><i class="fas fa-circle-check"></i> ${availableText}</span>
@@ -911,15 +908,27 @@ function calculateTotalUsage(usageBreakdown) {
     const balanceEntries = usageBreakdown.filter(b => b.isBalance);
     if (balanceEntries.length > 0) {
         const remainingBalance = balanceEntries.reduce((sum, item) => sum + Number(item.remainingBalance ?? item.totalBalance ?? item.usageLimit ?? 0), 0);
-        const usedBalance = balanceEntries.reduce((sum, item) => sum + Number(item.usedBalance ?? 0), 0);
-        const totalBalance = usedBalance + remainingBalance;
-        const percent = totalBalance > 0 ? Math.min(100, (usedBalance / totalBalance) * 100) : 0;
+        const balanceParts = balanceEntries.map(item => {
+            const amount = Number(item.remainingBalance ?? item.totalBalance ?? item.usageLimit ?? 0);
+            return {
+                amount,
+                currency: item.currency || item.unit || ''
+            };
+        });
+        const nonZeroParts = balanceParts.filter(item => item.amount > 0);
+        const displayParts = nonZeroParts.length > 0 ? nonZeroParts : balanceParts;
+        const displayText = displayParts
+            .map(item => formatCurrency(item.amount, item.currency))
+            .join(' + ');
+
         return {
             hasData: true,
-            used: usedBalance,
-            limit: totalBalance,
-            percent,
+            used: 0,
+            limit: remainingBalance,
+            percent: 0,
             isBalance: true,
+            remaining: remainingBalance,
+            displayText,
             currency: balanceEntries[0].currency || balanceEntries[0].unit || ''
         };
     }
