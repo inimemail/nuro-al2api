@@ -669,7 +669,7 @@ export function formatDeepSeekUsage(usageData) {
             balance.consumed_amount ??
             0
         );
-        const totalBalance = Number(balance.balance_limit ?? balance.initial_balance ?? (remainingBalance + usedBalance));
+        const totalBalance = usedBalance + remainingBalance;
 
         result.usageBreakdown.push({
             resourceType: 'BALANCE',

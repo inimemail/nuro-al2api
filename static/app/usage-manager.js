@@ -799,9 +799,9 @@ function createUsageBreakdownHTML(breakdown, providerType) {
  */
 function createBalanceBreakdownHTML(breakdown) {
     const availableText = breakdown.isAvailable ? t('usage.balance.available') : t('usage.balance.unavailable');
-    const remainingBalance = Number(breakdown.remainingBalance ?? breakdown.currentUsage ?? 0);
-    const usedBalance = Number(breakdown.usedBalance ?? breakdown.currentUsage ?? 0);
-    const totalBalance = Number(breakdown.totalBalance ?? breakdown.usageLimit ?? (remainingBalance + usedBalance));
+    const remainingBalance = Number(breakdown.remainingBalance ?? breakdown.totalBalance ?? breakdown.usageLimit ?? 0);
+    const usedBalance = Number(breakdown.usedBalance ?? 0);
+    const totalBalance = usedBalance + remainingBalance;
     const percent = totalBalance > 0 ? Math.min(100, (usedBalance / totalBalance) * 100) : 0;
     const progressClass = percent >= 90 ? 'danger' : (percent >= 70 ? 'warning' : 'normal');
     const grantedBalance = Number(breakdown.grantedBalance || 0);
@@ -910,9 +910,9 @@ function calculateTotalUsage(usageBreakdown) {
 
     const balanceEntries = usageBreakdown.filter(b => b.isBalance);
     if (balanceEntries.length > 0) {
-        const remainingBalance = balanceEntries.reduce((sum, item) => sum + Number(item.remainingBalance ?? item.currentUsage ?? 0), 0);
-        const usedBalance = balanceEntries.reduce((sum, item) => sum + Number(item.usedBalance ?? item.currentUsage ?? 0), 0);
-        const totalBalance = balanceEntries.reduce((sum, item) => sum + Number(item.totalBalance ?? item.usageLimit ?? ((item.remainingBalance ?? 0) + (item.usedBalance ?? item.currentUsage ?? 0))), 0);
+        const remainingBalance = balanceEntries.reduce((sum, item) => sum + Number(item.remainingBalance ?? item.totalBalance ?? item.usageLimit ?? 0), 0);
+        const usedBalance = balanceEntries.reduce((sum, item) => sum + Number(item.usedBalance ?? 0), 0);
+        const totalBalance = usedBalance + remainingBalance;
         const percent = totalBalance > 0 ? Math.min(100, (usedBalance / totalBalance) * 100) : 0;
         return {
             hasData: true,
