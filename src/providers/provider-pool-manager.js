@@ -15,7 +15,10 @@ import { broadcastEvent } from '../ui-modules/event-broadcast.js';
 import { ENDPOINT_TYPE } from '../utils/common.js';
 
 function normalizeProviderType(providerType) {
-    return providerType === 'openai-deepseek' ? MODEL_PROVIDER.DEEPSEEK_API : providerType;
+    const lowerProviderType = typeof providerType === 'string' ? providerType.toLowerCase() : providerType;
+    return (lowerProviderType === 'openai-deepseek' || lowerProviderType === 'deepseek')
+        ? MODEL_PROVIDER.DEEPSEEK_API
+        : providerType;
 }
 
 function getCustomModelAliasesForProvider(config, providerType) {

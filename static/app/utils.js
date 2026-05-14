@@ -90,7 +90,10 @@ function getBaseProviderConfigs() {
 function getProviderConfigs(supportedProviders = []) {
     const baseConfigs = getBaseProviderConfigs();
     supportedProviders = [...new Set(
-        supportedProviders.map(providerId => providerId === 'openai-deepseek' ? 'DeepSeek' : providerId)
+        supportedProviders.map(providerId => {
+            const lowerProviderId = typeof providerId === 'string' ? providerId.toLowerCase() : providerId;
+            return (lowerProviderId === 'openai-deepseek' || lowerProviderId === 'deepseek') ? 'DeepSeek' : providerId;
+        })
     )];
 
     const result = [];
@@ -240,7 +243,7 @@ function getFieldLabel(key) {
  * @returns {Array} 字段配置数组
  */
 function getProviderTypeFields(providerType) {
-    if (providerType === 'openai-deepseek') {
+    if (typeof providerType === 'string' && (providerType.toLowerCase() === 'openai-deepseek' || providerType.toLowerCase() === 'deepseek')) {
         providerType = 'DeepSeek';
     }
     // 基础配置字段定义

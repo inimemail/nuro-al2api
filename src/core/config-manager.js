@@ -22,7 +22,10 @@ function normalizeConfiguredProviders(config) {
         }
 
         // 1. 优先尝试精确匹配基础类型
-        const normalized = trimmed === 'openai-deepseek' ? MODEL_PROVIDER.DEEPSEEK_API : trimmed;
+        const lowerTrimmed = trimmed.toLowerCase();
+        const normalized = (lowerTrimmed === 'openai-deepseek' || lowerTrimmed === 'deepseek')
+            ? MODEL_PROVIDER.DEEPSEEK_API
+            : trimmed;
         const matched = ALL_MODEL_PROVIDERS.find((provider) => provider.toLowerCase() === normalized.toLowerCase());
         if (matched) {
             if (!dedupedProviders.includes(matched)) {

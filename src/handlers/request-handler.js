@@ -7,7 +7,7 @@ import { handleAPIRequests } from '../services/api-manager.js';
 import { getApiService, getProviderStatus } from '../services/service-manager.js';
 import { getProviderPoolManager } from '../services/service-manager.js';
 import { MODEL_PROVIDER } from '../utils/constants.js';
-import { getRegisteredProviders, isRegisteredProvider } from '../providers/adapter.js';
+import { getRegisteredProviders, isRegisteredProvider, normalizeRegisteredProvider } from '../providers/adapter.js';
 import { countTokensAnthropic } from '../utils/token-utils.js';
 import { PROMPT_LOG_FILENAME } from '../core/config-manager.js';
 import { getPluginManager } from '../core/plugin-manager.js';
@@ -183,7 +183,7 @@ export function createRequestHandler(config, providerPoolManager) {
                 const modelProviderHeader = req.headers['model-provider'];
                 if (modelProviderHeader) {
                     if (isRegisteredProvider(modelProviderHeader)) {
-                        currentConfig.MODEL_PROVIDER = modelProviderHeader;
+                        currentConfig.MODEL_PROVIDER = normalizeRegisteredProvider(modelProviderHeader);
                         logger.info(`[Config] MODEL_PROVIDER overridden by header to: ${currentConfig.MODEL_PROVIDER}`);
                     } else {
                         logger.warn(`[Config] Provider ${modelProviderHeader} in header is not available.`);
@@ -201,7 +201,7 @@ export function createRequestHandler(config, providerPoolManager) {
                     const isAutoMode = firstSegment === MODEL_PROVIDER.AUTO;
 
                     if (firstSegment && (isValidProvider || isAutoMode)) {
-                        currentConfig.MODEL_PROVIDER = firstSegment;
+                        currentConfig.MODEL_PROVIDER = isAutoMode ? MODEL_PROVIDER.AUTO : normalizeRegisteredProvider(firstSegment);
                         logger.info(`[Config] MODEL_PROVIDER overridden by path segment to: ${currentConfig.MODEL_PROVIDER}`);
                         pathSegments.shift();
                         path = '/' + pathSegments.join('/');

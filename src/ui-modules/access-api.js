@@ -1,7 +1,8 @@
 import { existsSync, readFileSync } from 'fs';
 
 function normalizeProviderType(providerType) {
-    return providerType === 'openai-deepseek' ? 'DeepSeek' : providerType;
+    const lowerProviderType = typeof providerType === 'string' ? providerType.toLowerCase() : providerType;
+    return (lowerProviderType === 'openai-deepseek' || lowerProviderType === 'deepseek') ? 'DeepSeek' : providerType;
 }
 
 function getProviderPoolsFilePath(currentConfig) {

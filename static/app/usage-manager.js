@@ -492,7 +492,7 @@ function createInstanceUsageCard(instance, providerType) {
 
     const displayUsageText = totalUsage.isCodex 
         ? `${totalUsage.percent.toFixed(1)}%`
-        : (totalUsage.isBalance ? formatCurrency(totalUsage.limit, totalUsage.currency) : `${formatNumber(totalUsage.used)} / ${formatNumber(totalUsage.limit)}`);
+        : `${formatNumber(totalUsage.used)} / ${formatCurrency(totalUsage.limit, totalUsage.currency)}`;
     
     collapsedSummary.innerHTML = `
         <div class="collapsed-summary-row collapsed-summary-name-row">
@@ -505,10 +505,10 @@ function createInstanceUsageCard(instance, providerType) {
         ${showUsage ? `
         <div class="collapsed-summary-row collapsed-summary-usage-row">
             ${totalUsage.hasData ? `
-                ${totalUsage.isBalance ? '' : `<div class="collapsed-progress-bar ${progressClass}">
+                <div class="collapsed-progress-bar ${progressClass}">
                     <div class="progress-fill" style="width: ${totalUsage.percent}%"></div>
-                </div>`}
-                ${totalUsage.isBalance ? '' : `<span class="collapsed-percent">${totalUsage.percent.toFixed(1)}%</span>`}
+                </div>
+                <span class="collapsed-percent">${totalUsage.percent.toFixed(1)}%</span>
                 <span class="collapsed-usage-text">${displayUsageText}</span>
             ` : (instance.error ? `<span class="collapsed-error" data-i18n="common.error">${t('common.error')}</span>` : '')}
         </div>
@@ -799,6 +799,10 @@ function createUsageBreakdownHTML(breakdown, providerType) {
  */
 function createBalanceBreakdownHTML(breakdown) {
     const availableText = breakdown.isAvailable ? t('usage.balance.available') : t('usage.balance.unavailable');
+    const remainingBalance = Number(breakdown.remainingBalance ?? breakdown.currentUsage ?? 0);
+    const balanceLimit = Number(breakdown.balanceLimit ?? breakdown.usageLimit ?? remainingBalance);
+    const percent = balanceLimit > 0 ? Math.min(100, (remainingBalance / balanceLimit) * 100) : 0;
+    const progressClass = percent <= 10 ? 'danger' : (percent <= 30 ? 'warning' : 'normal');
     const grantedBalance = Number(breakdown.grantedBalance || 0);
     const toppedUpBalance = Number(breakdown.toppedUpBalance || 0);
 
@@ -806,7 +810,10 @@ function createBalanceBreakdownHTML(breakdown) {
         <div class="breakdown-item-compact">
             <div class="breakdown-header-compact">
                 <span class="breakdown-name">${breakdown.displayName || 'Available Balance'}</span>
-                <span class="breakdown-usage">${formatCurrency(breakdown.totalBalance, breakdown.currency)}</span>
+                <span class="breakdown-usage">${formatNumber(remainingBalance)} / ${formatCurrency(balanceLimit, breakdown.currency)}</span>
+            </div>
+            <div class="progress-bar-small ${progressClass}">
+                <div class="progress-fill" style="width: ${percent}%"></div>
             </div>
             <div class="extra-usage-info">
                 <span class="extra-label"><i class="fas fa-circle-check"></i> ${availableText}</span>
@@ -902,12 +909,14 @@ function calculateTotalUsage(usageBreakdown) {
 
     const balanceEntries = usageBreakdown.filter(b => b.isBalance);
     if (balanceEntries.length > 0) {
-        const totalBalance = balanceEntries.reduce((sum, item) => sum + Number(item.totalBalance || item.usageLimit || 0), 0);
+        const remainingBalance = balanceEntries.reduce((sum, item) => sum + Number(item.remainingBalance ?? item.currentUsage ?? 0), 0);
+        const balanceLimit = balanceEntries.reduce((sum, item) => sum + Number(item.balanceLimit ?? item.usageLimit ?? item.remainingBalance ?? item.currentUsage ?? 0), 0);
+        const percent = balanceLimit > 0 ? Math.min(100, (remainingBalance / balanceLimit) * 100) : 0;
         return {
             hasData: true,
-            used: 0,
-            limit: totalBalance,
-            percent: 0,
+            used: remainingBalance,
+            limit: balanceLimit,
+            percent,
             isBalance: true,
             currency: balanceEntries[0].currency || balanceEntries[0].unit || ''
         };

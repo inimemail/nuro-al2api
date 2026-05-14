@@ -390,6 +390,7 @@ export function getProtocolPrefix(provider) {
     if (
         provider === MODEL_PROVIDER.DEEPSEEK_API ||
         provider === 'openai-deepseek' ||
+        provider === 'deepseek' ||
         provider?.startsWith(`${MODEL_PROVIDER.DEEPSEEK_API}-`)
     ) {
         return MODEL_PROTOCOL_PREFIX.OPENAI;

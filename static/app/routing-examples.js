@@ -170,8 +170,8 @@ function getAvailableRoutes() {
             provider: 'DeepSeek',
             name: 'DeepSeek',
             paths: {
-                openai: '/DeepSeek/v1/chat/completions',
-                claude: '/DeepSeek/v1/messages'
+                openai: '/deepseek/v1/chat/completions',
+                claude: '/deepseek/v1/messages'
             },
             description: t('dashboard.routing.official'),
             badge: t('dashboard.routing.official'),
