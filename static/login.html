@@ -10,31 +10,56 @@
             margin: 0;
             padding: 0;
             box-sizing: border-box;
+            -webkit-font-smoothing: antialiased;
         }
 
         body {
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+            font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
             min-height: 100vh;
             display: flex;
             align-items: center;
             justify-content: center;
             padding: 20px;
+            background: #f0fdf4;
+            background-image:
+                radial-gradient(ellipse at 20% 20%, rgba(5, 150, 105, 0.12) 0%, transparent 55%),
+                radial-gradient(ellipse at 80% 80%, rgba(16, 185, 129, 0.08) 0%, transparent 55%),
+                radial-gradient(ellipse at 60% 10%, rgba(99, 102, 241, 0.06) 0%, transparent 45%);
+        }
+
+        [data-theme="dark"] body {
+            background: #0f172a;
+            background-image:
+                radial-gradient(ellipse at 20% 20%, rgba(52, 211, 153, 0.08) 0%, transparent 55%),
+                radial-gradient(ellipse at 80% 80%, rgba(16, 185, 129, 0.05) 0%, transparent 55%);
+        }
+
+        .login-wrapper {
+            width: 100%;
+            max-width: 420px;
+            display: flex;
+            flex-direction: column;
+            gap: 1.5rem;
         }
 
         .login-container {
-            background: white;
-            border-radius: 12px;
-            box-shadow: 0 10px 40px rgba(0, 0, 0, 0.1);
+            background: rgba(255, 255, 255, 0.92);
+            backdrop-filter: blur(20px);
+            -webkit-backdrop-filter: blur(20px);
+            border-radius: 20px;
+            box-shadow:
+                0 0 0 1px rgba(5, 150, 105, 0.08),
+                0 4px 6px -1px rgba(0, 0, 0, 0.05),
+                0 20px 40px -8px rgba(0, 0, 0, 0.1);
             width: 100%;
-            max-width: 400px;
-            padding: 40px;
-            animation: fadeIn 0.5s ease-in;
+            padding: 2.5rem;
+            animation: fadeUp 0.4s cubic-bezier(0.16, 1, 0.3, 1);
         }
 
-        @keyframes fadeIn {
+        @keyframes fadeUp {
             from {
                 opacity: 0;
-                transform: translateY(-20px);
+                transform: translateY(16px);
             }
             to {
                 opacity: 1;
@@ -44,126 +69,173 @@
 
         .logo {
             text-align: center;
-            margin-bottom: 30px;
+            margin-bottom: 2rem;
+        }
+
+        .logo-icon {
+            width: 64px;
+            height: 64px;
+            border-radius: 16px;
+            background: linear-gradient(135deg, #059669 0%, #10b981 100%);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            margin: 0 auto 1rem;
+            box-shadow: 0 8px 20px rgba(5, 150, 105, 0.3);
+            font-size: 1.75rem;
+            color: white;
         }
 
         .logo img {
-            width: 80px;
-            height: 80px;
-            border-radius: 50%;
-            margin-bottom: 15px;
+            width: 64px;
+            height: 64px;
+            border-radius: 16px;
+            margin-bottom: 1rem;
+            box-shadow: 0 8px 20px rgba(5, 150, 105, 0.25);
         }
 
         .logo h1 {
-            font-size: 24px;
-            color: #333;
-            margin-bottom: 5px;
+            font-size: 1.5rem;
+            font-weight: 700;
+            color: #0f172a;
+            margin-bottom: 0.375rem;
+            letter-spacing: -0.03em;
         }
 
         .logo p {
-            font-size: 14px;
-            color: #666;
+            font-size: 0.875rem;
+            color: #64748b;
+            font-weight: 400;
         }
 
         .form-group {
-            margin-bottom: 20px;
+            margin-bottom: 1.25rem;
         }
 
         .form-group label {
             display: block;
-            margin-bottom: 8px;
-            color: #333;
-            font-size: 14px;
-            font-weight: 500;
+            margin-bottom: 0.5rem;
+            color: #374151;
+            font-size: 0.875rem;
+            font-weight: 600;
+            letter-spacing: -0.01em;
+        }
+
+        .input-wrapper {
+            position: relative;
+        }
+
+        .input-icon {
+            position: absolute;
+            left: 0.875rem;
+            top: 50%;
+            transform: translateY(-50%);
+            color: #94a3b8;
+            font-size: 0.875rem;
+            pointer-events: none;
         }
 
         .form-group input {
             width: 100%;
-            padding: 12px 15px;
-            border: 2px solid #e1e8ed;
-            border-radius: 8px;
-            font-size: 14px;
-            transition: all 0.3s ease;
+            padding: 0.75rem 0.875rem 0.75rem 2.5rem;
+            border: 1.5px solid #e2e8f0;
+            border-radius: 12px;
+            font-size: 0.9375rem;
+            transition: all 0.2s ease;
             outline: none;
+            background: #f8fafc;
+            color: #0f172a;
+            font-family: inherit;
         }
 
         .form-group input:focus {
             border-color: #059669;
-            box-shadow: 0 0 0 3px rgba(5, 150, 105, 0.1);
+            background: #ffffff;
+            box-shadow: 0 0 0 3px rgba(5, 150, 105, 0.12);
         }
 
         .form-group input::placeholder {
-            color: #aaa;
+            color: #94a3b8;
+            font-size: 0.875rem;
         }
 
         .error-message {
-            color: #e74c3c;
-            font-size: 13px;
-            margin-top: 8px;
+            color: #ef4444;
+            font-size: 0.8125rem;
+            margin-top: 0.5rem;
             display: none;
+            align-items: center;
+            gap: 0.375rem;
             animation: shake 0.3s ease-in-out;
+            font-weight: 500;
         }
 
         @keyframes shake {
             0%, 100% { transform: translateX(0); }
-            25% { transform: translateX(-10px); }
-            75% { transform: translateX(10px); }
+            25% { transform: translateX(-6px); }
+            75% { transform: translateX(6px); }
         }
 
         .error-message.show {
-            display: block;
+            display: flex;
         }
 
         .login-button {
             width: 100%;
-            padding: 12px;
+            padding: 0.8125rem;
             background: linear-gradient(135deg, #059669 0%, #10b981 100%);
             color: white;
             border: none;
-            border-radius: 8px;
-            font-size: 16px;
+            border-radius: 12px;
+            font-size: 0.9375rem;
             font-weight: 600;
             cursor: pointer;
-            transition: all 0.3s ease;
-            margin-top: 10px;
+            transition: all 0.2s ease;
+            margin-top: 0.5rem;
+            letter-spacing: -0.01em;
+            box-shadow: 0 4px 12px rgba(5, 150, 105, 0.3);
+            font-family: inherit;
         }
 
         .login-button:hover {
-            transform: translateY(-2px);
-            box-shadow: 0 5px 20px rgba(5, 150, 105, 0.4);
+            transform: translateY(-1px);
+            box-shadow: 0 6px 20px rgba(5, 150, 105, 0.4);
+            background: linear-gradient(135deg, #047857 0%, #059669 100%);
         }
 
         .login-button:active {
             transform: translateY(0);
+            box-shadow: 0 2px 8px rgba(5, 150, 105, 0.3);
         }
 
         .login-button:disabled {
-            background: #ccc;
+            background: #cbd5e1;
             cursor: not-allowed;
             transform: none;
+            box-shadow: none;
         }
 
         .footer {
             text-align: center;
-            margin-top: 30px;
-            padding-top: 20px;
-            border-top: 1px solid #e1e8ed;
+            padding-top: 1.5rem;
+            border-top: 1px solid #f1f5f9;
+            margin-top: 0.5rem;
         }
 
         .footer p {
-            font-size: 13px;
-            color: #999;
+            font-size: 0.8125rem;
+            color: #94a3b8;
         }
 
         .loading {
             display: inline-block;
-            width: 16px;
-            height: 16px;
-            border: 2px solid #ffffff;
+            width: 15px;
+            height: 15px;
+            border: 2px solid rgba(255, 255, 255, 0.4);
             border-radius: 50%;
-            border-top-color: transparent;
-            animation: spin 0.8s linear infinite;
-            margin-right: 8px;
+            border-top-color: #ffffff;
+            animation: spin 0.7s linear infinite;
+            margin-right: 0.5rem;
             vertical-align: middle;
         }
 
@@ -171,13 +243,20 @@
             to { transform: rotate(360deg); }
         }
 
+        .lang-switcher-wrap {
+            position: absolute;
+            top: 1.25rem;
+            right: 1.25rem;
+        }
+
         @media (max-width: 480px) {
             .login-container {
-                padding: 30px 20px;
+                padding: 2rem 1.5rem;
+                border-radius: 16px;
             }
 
             .logo h1 {
-                font-size: 20px;
+                font-size: 1.25rem;
             }
         }
     </style>
@@ -185,36 +264,45 @@
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
 </head>
 <body>
-    <div style="position: absolute; top: 20px; right: 20px;" id="langSwitcherContainer"></div>
-    <div class="login-container">
-        <div class="logo">
-            <img src="/favicon.ico" alt="Logo" onerror="this.style.display='none'">
-            <h1>AIClient2API</h1>
-            <p data-i18n="login.heading">请登录以继续</p>
-        </div>
-
-        <form id="loginForm">
-            <div class="form-group">
-                <label for="password" data-i18n="login.password">密码</label>
-                <input
-                    type="password"
-                    id="password"
-                    name="password"
-                    data-i18n="login.passwordPlaceholder"
-                    placeholder="请输入密码"
-                    autocomplete="current-password"
-                    required
-                >
-                <div class="error-message" id="errorMessage" data-i18n="login.error.incorrect">密码错误，请重试</div>
+    <div class="lang-switcher-wrap" id="langSwitcherContainer"></div>
+    <div class="login-wrapper">
+        <div class="login-container">
+            <div class="logo">
+                <img src="/favicon.ico" alt="Logo" onerror="this.style.display='none'; this.nextElementSibling.style.display='flex'">
+                <div class="logo-icon" style="display:none"><i class="fas fa-robot"></i></div>
+                <h1>AIClient2API</h1>
+                <p data-i18n="login.heading">请登录以继续</p>
             </div>
 
-            <button type="submit" class="login-button" id="loginButton" data-i18n="login.button">
-                登录
-            </button>
-        </form>
+            <form id="loginForm">
+                <div class="form-group">
+                    <label for="password" data-i18n="login.password">密码</label>
+                    <div class="input-wrapper">
+                        <i class="fas fa-lock input-icon"></i>
+                        <input
+                            type="password"
+                            id="password"
+                            name="password"
+                            data-i18n="login.passwordPlaceholder"
+                            placeholder="请输入密码"
+                            autocomplete="current-password"
+                            required
+                        >
+                    </div>
+                    <div class="error-message" id="errorMessage">
+                        <i class="fas fa-exclamation-circle"></i>
+                        <span data-i18n="login.error.incorrect">密码错误，请重试</span>
+                    </div>
+                </div>
 
-        <div class="footer">
-            <p>&copy; 2077 AIClient2API. All rights reserved.</p>
+                <button type="submit" class="login-button" id="loginButton" data-i18n="login.button">
+                    登录
+                </button>
+            </form>
+
+            <div class="footer">
+                <p>&copy; 2077 AIClient2API. All rights reserved.</p>
+            </div>
         </div>
     </div>
 
@@ -222,26 +310,23 @@
         import { initI18n, t, setLanguage } from './app/i18n.js';
         import { initLanguageSwitcher } from './app/language-switcher.js';
 
-        // 初始化多语言
         initI18n();
-        
-        // 初始化语言切换器
+
         const langContainer = document.getElementById('langSwitcherContainer');
         if (langContainer) {
             import('./app/language-switcher.js').then(module => {
                 const switcher = module.createLanguageSwitcher();
                 langContainer.appendChild(switcher);
-                
-                // 绑定事件逻辑（由于是动态创建，复用逻辑）
+
                 const languageBtn = switcher.querySelector('#languageBtn');
                 const languageDropdown = switcher.querySelector('#languageDropdown');
                 const languageOptions = switcher.querySelectorAll('.language-option');
-                
+
                 languageBtn.addEventListener('click', (e) => {
                     e.stopPropagation();
                     languageDropdown.classList.toggle('show');
                 });
-                
+
                 languageOptions.forEach(option => {
                     option.addEventListener('click', (e) => {
                         e.stopPropagation();
@@ -253,7 +338,7 @@
                         languageDropdown.classList.remove('show');
                     });
                 });
-                
+
                 document.addEventListener('click', () => {
                     languageDropdown.classList.remove('show');
                 });
@@ -265,43 +350,33 @@
         const errorMessage = document.getElementById('errorMessage');
         const loginButton = document.getElementById('loginButton');
 
-        // 检查是否已经登录
         checkLoginStatus();
 
         loginForm.addEventListener('submit', async (e) => {
             e.preventDefault();
-            
+
             const password = passwordInput.value.trim();
-            
+
             if (!password) {
                 showError(t('login.error.empty'));
                 return;
             }
 
-            // 禁用按钮并显示加载状态
             loginButton.disabled = true;
             loginButton.innerHTML = `<span class="loading"></span>${t('login.loggingIn')}`;
             errorMessage.classList.remove('show');
 
             try {
-                // 直接使用fetch进行登录请求（登录页面不需要token）
                 const response = await fetch('/api/login', {
                     method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/json'
-                    },
-                    body: JSON.stringify({
-                        password
-                    })
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ password })
                 });
 
                 const data = await response.json();
 
                 if (response.ok && data.success) {
-                    // 登录成功，保存token
                     localStorage.setItem('authToken', data.token);
-                    
-                    // 跳转到主页
                     window.location.href = '/';
                 } else {
                     const errorMsg = data.messageCode ? t(data.messageCode, data.messageParams) : (data.message || t('login.error.incorrect'));
@@ -320,30 +395,28 @@
         });
 
         function showError(message) {
-            errorMessage.textContent = message;
+            const span = errorMessage.querySelector('span');
+            if (span) span.textContent = message;
+            else errorMessage.textContent = message;
             errorMessage.classList.add('show');
-            passwordInput.classList.add('error');
-            
+            passwordInput.style.borderColor = '#ef4444';
+
             setTimeout(() => {
-                passwordInput.classList.remove('error');
-            }, 300);
+                passwordInput.style.borderColor = '';
+            }, 600);
         }
 
         function checkLoginStatus() {
             const token = localStorage.getItem('authToken');
-            
             if (token) {
-                // Token存在，跳转到主页
                 window.location.href = '/';
             }
         }
 
-        // 监听输入，清除错误提示
         passwordInput.addEventListener('input', () => {
             errorMessage.classList.remove('show');
         });
 
-        // 页面加载时聚焦到密码输入框
         passwordInput.focus();
     </script>
     </body>
