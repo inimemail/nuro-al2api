@@ -658,20 +658,27 @@ export function formatDeepSeekUsage(usageData) {
 
     for (const balance of balanceInfos) {
         const currency = balance.currency || 'CNY';
-        const totalBalance = Number(balance.total_balance ?? 0);
+        const remainingBalance = Number(balance.total_balance ?? 0);
         const grantedBalance = Number(balance.granted_balance ?? 0);
         const toppedUpBalance = Number(balance.topped_up_balance ?? 0);
-        const remainingBalance = totalBalance;
-        const balanceLimit = Number(balance.balance_limit ?? balance.initial_balance ?? totalBalance);
+        const usedBalance = Number(
+            balance.used_balance ??
+            balance.used_amount ??
+            balance.monthly_usage ??
+            balance.consumed_balance ??
+            balance.consumed_amount ??
+            0
+        );
+        const totalBalance = Number(balance.balance_limit ?? balance.initial_balance ?? (remainingBalance + usedBalance));
 
         result.usageBreakdown.push({
             resourceType: 'BALANCE',
-            displayName: `Available Balance (${currency})`,
-            displayNamePlural: `Available Balance (${currency})`,
+            displayName: `Balance Usage (${currency})`,
+            displayNamePlural: `Balance Usage (${currency})`,
             unit: currency,
             currency,
-            currentUsage: remainingBalance,
-            usageLimit: balanceLimit,
+            currentUsage: usedBalance,
+            usageLimit: totalBalance,
             nextDateReset: null,
             freeTrial: grantedBalance > 0 ? {
                 status: 'ACTIVE',
@@ -692,8 +699,8 @@ export function formatDeepSeekUsage(usageData) {
             isBalance: true,
             isAvailable: usageData.is_available !== false,
             remainingBalance,
+            usedBalance,
             totalBalance,
-            balanceLimit,
             grantedBalance,
             toppedUpBalance
         });
