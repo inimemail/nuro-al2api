@@ -49,6 +49,16 @@ const KIRO_CONSTANTS = {
     TOTAL_CONTEXT_TOKENS: 200000, // Claude Sonnet 4.5 actual context is 200K
 };
 
+const KIRO_CONTEXT_COMPRESSION = {
+    DEFAULT_THRESHOLD_TOKENS: 160000,
+    DEFAULT_TARGET_TOKENS: 140000,
+    DEFAULT_KEEP_RECENT_MESSAGES: 8,
+    DEFAULT_MAX_SUMMARY_TOKENS: 12000,
+    DEFAULT_MESSAGE_CHARS: 1200,
+    MIN_SUMMARY_TOKENS: 512,
+    MIN_MESSAGE_CHARS: 160,
+};
+
 const KIRO_MAX_TOOL_NAME_LENGTH = 64;
 let kiroThrottleQueue = Promise.resolve();
 let kiroLastRequestStartedAt = 0;
@@ -3211,6 +3221,259 @@ async saveCredentialsToFile(filePath, newData) {
         return requestBody;
     }
 
+    _getKiroContextCompressionSettings(model) {
+        const contextTokens = getContextTokensForModel(model, this.config, resolveKiroModel(model));
+        const configuredThreshold = normalizeContextLength(this.config.KIRO_CONTEXT_COMPRESSION_THRESHOLD_TOKENS);
+        const configuredTarget = normalizeContextLength(this.config.KIRO_CONTEXT_COMPRESSION_TARGET_TOKENS);
+        const safetyReserveTokens = Math.min(8192, Math.max(1024, Math.floor(contextTokens * 0.05)));
+        const thresholdTokens = Math.floor(Math.min(
+            configuredThreshold || KIRO_CONTEXT_COMPRESSION.DEFAULT_THRESHOLD_TOKENS,
+            Math.max(1, contextTokens - safetyReserveTokens)
+        ));
+        const targetHeadroomTokens = Math.min(4096, Math.max(512, Math.floor(thresholdTokens * 0.05)));
+        let targetTokens = Math.floor(configuredTarget || KIRO_CONTEXT_COMPRESSION.DEFAULT_TARGET_TOKENS);
+        targetTokens = Math.min(targetTokens, Math.max(1, thresholdTokens - targetHeadroomTokens));
+        targetTokens = Math.max(1, targetTokens);
+
+        const keepRecentRaw = Number(this.config.KIRO_CONTEXT_COMPRESSION_KEEP_RECENT_MESSAGES);
+        const keepRecentMessages = Number.isFinite(keepRecentRaw) && keepRecentRaw >= 2
+            ? Math.floor(keepRecentRaw)
+            : KIRO_CONTEXT_COMPRESSION.DEFAULT_KEEP_RECENT_MESSAGES;
+
+        const maxSummaryRaw = Number(this.config.KIRO_CONTEXT_COMPRESSION_MAX_SUMMARY_TOKENS);
+        const maxSummaryTokens = Number.isFinite(maxSummaryRaw) && maxSummaryRaw > 0
+            ? Math.max(KIRO_CONTEXT_COMPRESSION.MIN_SUMMARY_TOKENS, Math.floor(maxSummaryRaw))
+            : KIRO_CONTEXT_COMPRESSION.DEFAULT_MAX_SUMMARY_TOKENS;
+
+        const messageCharsRaw = Number(this.config.KIRO_CONTEXT_COMPRESSION_MESSAGE_CHARS);
+        const messageChars = Number.isFinite(messageCharsRaw) && messageCharsRaw > 0
+            ? Math.max(KIRO_CONTEXT_COMPRESSION.MIN_MESSAGE_CHARS, Math.floor(messageCharsRaw))
+            : KIRO_CONTEXT_COMPRESSION.DEFAULT_MESSAGE_CHARS;
+
+        return {
+            contextTokens,
+            thresholdTokens,
+            targetTokens,
+            keepRecentMessages,
+            maxSummaryTokens,
+            messageChars
+        };
+    }
+
+    _isKiroContextCompressionEnabled() {
+        const value = this.config.KIRO_CONTEXT_COMPRESSION_ENABLED;
+        if (value === false) return false;
+        if (typeof value === 'string' && value.toLowerCase().trim() === 'false') return false;
+        return true;
+    }
+
+    _cloneMessageForCompression(message) {
+        if (!message || typeof message !== 'object') {
+            return message;
+        }
+        return {
+            ...message,
+            content: Array.isArray(message.content)
+                ? message.content.map(part => (
+                    part && typeof part === 'object' && !Buffer.isBuffer(part)
+                        ? { ...part }
+                        : part
+                ))
+                : message.content
+        };
+    }
+
+    _messageContainsToolResult(message) {
+        if (!Array.isArray(message?.content)) {
+            return false;
+        }
+        return message.content.some(part => part?.type === 'tool_result');
+    }
+
+    _truncateKiroSummaryText(text, maxChars) {
+        const raw = String(text || '').replace(/\s+/g, ' ').trim();
+        if (raw.length <= maxChars) {
+            return raw;
+        }
+        return `${raw.slice(0, Math.max(0, maxChars - 20)).trimEnd()}... [truncated]`;
+    }
+
+    _summarizeKiroMessageForCompression(message, index, maxChars) {
+        const role = message?.role || 'unknown';
+        const parts = [];
+
+        if (Array.isArray(message?.content)) {
+            for (const part of message.content) {
+                if (!part || typeof part !== 'object') {
+                    const text = String(part ?? '').trim();
+                    if (text) parts.push(text);
+                    continue;
+                }
+
+                if (part.type === 'text') {
+                    parts.push(part.text || '');
+                } else if (part.type === 'thinking') {
+                    const thinking = part.thinking ?? part.text ?? '';
+                    if (thinking) parts.push(`[thinking omitted: ${this.countTextTokens(thinking)} tokens]`);
+                } else if (part.type === 'tool_use') {
+                    const inputText = (() => {
+                        try {
+                            return JSON.stringify(part.input ?? {});
+                        } catch {
+                            return String(part.input ?? '');
+                        }
+                    })();
+                    parts.push(`[tool_use ${part.name || 'unknown'}${part.id ? ` ${part.id}` : ''}: ${this._truncateKiroSummaryText(inputText, Math.floor(maxChars / 2))}]`);
+                } else if (part.type === 'tool_result') {
+                    const resultText = this.getContentText(part.content);
+                    const status = part.is_error || part.status === 'error' ? ' error' : '';
+                    parts.push(`[tool_result${status}${part.tool_use_id ? ` ${part.tool_use_id}` : ''}: ${this._truncateKiroSummaryText(resultText, Math.floor(maxChars / 2))}]`);
+                } else if (part.type === 'image') {
+                    parts.push('[image omitted]');
+                } else if (part.type === 'document') {
+                    const label = part.title ? ` ${part.title}` : '';
+                    if (part?.source?.type === 'text' && part.source.data) {
+                        parts.push(`[document${label}: ${this._truncateKiroSummaryText(part.source.data, Math.floor(maxChars / 2))}]`);
+                    } else {
+                        parts.push(`[document${label} omitted]`);
+                    }
+                } else {
+                    const fallbackText = part.text || part.content || '';
+                    if (fallbackText) parts.push(String(fallbackText));
+                    else parts.push(`[${part.type || 'content'} omitted]`);
+                }
+            }
+        } else {
+            parts.push(this.getContentText(message));
+        }
+
+        const text = this._truncateKiroSummaryText(parts.join(' '), maxChars);
+        return `${index + 1}. ${role}: ${text || '[empty]'}`;
+    }
+
+    _buildCompressedKiroHistoryMessage(messages, settings) {
+        const maxSummaryChars = Math.max(
+            settings.messageChars,
+            settings.maxSummaryTokens * 4
+        );
+        const lines = [];
+        let usedChars = 0;
+
+        for (let i = 0; i < messages.length; i++) {
+            const remainingMessages = messages.length - i;
+            const remainingChars = Math.max(
+                settings.messageChars,
+                maxSummaryChars - usedChars
+            );
+            const perMessageChars = Math.max(
+                KIRO_CONTEXT_COMPRESSION.MIN_MESSAGE_CHARS,
+                Math.min(settings.messageChars, Math.floor(remainingChars / remainingMessages))
+            );
+            const line = this._summarizeKiroMessageForCompression(messages[i], i, perMessageChars);
+            lines.push(line);
+            usedChars += line.length + 1;
+            if (usedChars >= maxSummaryChars) {
+                const omitted = messages.length - i - 1;
+                if (omitted > 0) {
+                    lines.push(`... ${omitted} older message(s) omitted from compressed summary.`);
+                }
+                break;
+            }
+        }
+
+        return {
+            role: 'user',
+            content: [
+                {
+                    type: 'text',
+                    text: [
+                        '[Compressed earlier conversation]',
+                        'Older context was compacted locally to keep the Kiro request under its stable context budget. Preserve these facts when answering, but trust the later uncompressed messages more if there is a conflict.',
+                        '',
+                        ...lines,
+                        '[End compressed earlier conversation]'
+                    ].join('\n')
+                }
+            ]
+        };
+    }
+
+    _trimCompressedKiroMessage(summaryMessage, targetTokens, requestBody) {
+        let currentTokens = this.estimateInputTokens(requestBody);
+        if (currentTokens <= targetTokens) {
+            return currentTokens;
+        }
+
+        const block = Array.isArray(summaryMessage.content) ? summaryMessage.content[0] : null;
+        if (!block || typeof block.text !== 'string') {
+            return currentTokens;
+        }
+
+        while (currentTokens > targetTokens && block.text.length > 1200) {
+            const nextLength = Math.max(1000, Math.floor(block.text.length * 0.72));
+            block.text = `${block.text.slice(0, nextLength).trimEnd()}\n... [compressed summary truncated further]\n[End compressed earlier conversation]`;
+            currentTokens = this.estimateInputTokens(requestBody);
+        }
+
+        return currentTokens;
+    }
+
+    _compactKiroRequestContextIfNeeded(requestBody, model) {
+        if (!this._isKiroContextCompressionEnabled()) {
+            return { compressed: false, inputTokens: this.estimateInputTokens(requestBody) };
+        }
+
+        if (!Array.isArray(requestBody?.messages) || requestBody.messages.length <= 2) {
+            return { compressed: false, inputTokens: this.estimateInputTokens(requestBody) };
+        }
+
+        const settings = this._getKiroContextCompressionSettings(model);
+        const beforeTokens = this.estimateInputTokens(requestBody);
+        if (beforeTokens <= settings.thresholdTokens) {
+            return { compressed: false, inputTokens: beforeTokens };
+        }
+
+        const keepCount = Math.min(
+            settings.keepRecentMessages,
+            Math.max(1, requestBody.messages.length - 1)
+        );
+        let splitIndex = Math.max(1, requestBody.messages.length - keepCount);
+        const currentIndex = requestBody.messages.length - 1;
+
+        if (splitIndex >= currentIndex) {
+            splitIndex = currentIndex;
+        }
+        while (splitIndex > 1 && this._messageContainsToolResult(requestBody.messages[splitIndex])) {
+            splitIndex--;
+        }
+
+        const olderMessages = requestBody.messages.slice(0, splitIndex);
+        const recentMessages = requestBody.messages.slice(splitIndex).map(message => this._cloneMessageForCompression(message));
+
+        if (olderMessages.length === 0) {
+            return { compressed: false, inputTokens: beforeTokens };
+        }
+
+        const compressedMessage = this._buildCompressedKiroHistoryMessage(olderMessages, settings);
+        requestBody.messages = [compressedMessage, ...recentMessages];
+
+        let afterTokens = this._trimCompressedKiroMessage(compressedMessage, settings.targetTokens, requestBody);
+        let additionalDropped = 0;
+
+        while (afterTokens > settings.targetTokens && requestBody.messages.length > 2) {
+            requestBody.messages.splice(1, 1);
+            additionalDropped++;
+            afterTokens = this.estimateInputTokens(requestBody);
+        }
+
+        if (afterTokens > settings.targetTokens) {
+            afterTokens = this._trimCompressedKiroMessage(compressedMessage, Math.max(1, settings.targetTokens - 4096), requestBody);
+        }
+
+        logger.warn(`[Kiro] Context auto-compressed: input_tokens ${beforeTokens} -> ${afterTokens}, older_messages=${olderMessages.length}, kept_recent=${recentMessages.length - additionalDropped}, dropped_recent=${additionalDropped}, threshold=${settings.thresholdTokens}, target=${settings.targetTokens}`);
+        return { compressed: true, inputTokens: afterTokens, beforeTokens };
+    }
+
     async generateContent(model, requestBody) {
         if (!this.isInitialized) await this.initialize();
 
@@ -3225,6 +3488,7 @@ async saveCredentialsToFile(filePath, newData) {
 
         this._normalizeRequestBody(requestBody);
         this._applyEffectiveThinkingToRequestBody(requestBody);
+        const contextCompression = this._compactKiroRequestContextIfNeeded(requestBody, model);
 
         // 检查 token 是否即将过期，如果是则推送到刷新队列
         if (this.isTokenExpired()) {
@@ -3239,7 +3503,7 @@ async saveCredentialsToFile(filePath, newData) {
         logger.info(`[Kiro] Calling generateContent with model: ${finalModel}`);
 
         // Estimate input tokens before making the API call
-        const inputTokens = this.estimateInputTokens(requestBody);
+        const inputTokens = contextCompression.inputTokens ?? this.estimateInputTokens(requestBody);
 
         const maxEmptyRetries = Number(this.config.KIRO_EMPTY_RESPONSE_MAX_RETRIES) || 2;
         let emptyRetryCount = 0;
@@ -3740,6 +4004,7 @@ async saveCredentialsToFile(filePath, newData) {
 
         this._normalizeRequestBody(requestBody);
         this._applyEffectiveThinkingToRequestBody(requestBody);
+        const contextCompression = this._compactKiroRequestContextIfNeeded(requestBody, model);
 
         // 检查 token 是否即将过期，如果是则推送到刷新队列
         if (this.isTokenExpired()) {
@@ -3990,7 +4255,7 @@ async saveCredentialsToFile(filePath, newData) {
                 pendingToolCalls.delete(toolUseId);
             };
 
-            const estimatedInputTokens = this.estimateInputTokens(requestBody);
+            const estimatedInputTokens = contextCompression.inputTokens ?? this.estimateInputTokens(requestBody);
             const maxEmptyRetries = Number(this.config.KIRO_EMPTY_RESPONSE_MAX_RETRIES) || 1;
             let emptyRetryCount = 0;
 

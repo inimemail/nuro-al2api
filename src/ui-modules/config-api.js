@@ -82,6 +82,12 @@ export async function handleGetConfig(req, res, currentConfig) {
         REQUEST_BASE_DELAY: currentConfig.REQUEST_BASE_DELAY,
         CREDENTIAL_SWITCH_MAX_RETRIES: currentConfig.CREDENTIAL_SWITCH_MAX_RETRIES,
         RATE_LIMIT_COOLDOWN_ENABLED: currentConfig.RATE_LIMIT_COOLDOWN_ENABLED,
+        KIRO_CONTEXT_COMPRESSION_ENABLED: currentConfig.KIRO_CONTEXT_COMPRESSION_ENABLED,
+        KIRO_CONTEXT_COMPRESSION_THRESHOLD_TOKENS: currentConfig.KIRO_CONTEXT_COMPRESSION_THRESHOLD_TOKENS,
+        KIRO_CONTEXT_COMPRESSION_TARGET_TOKENS: currentConfig.KIRO_CONTEXT_COMPRESSION_TARGET_TOKENS,
+        KIRO_CONTEXT_COMPRESSION_KEEP_RECENT_MESSAGES: currentConfig.KIRO_CONTEXT_COMPRESSION_KEEP_RECENT_MESSAGES,
+        KIRO_CONTEXT_COMPRESSION_MAX_SUMMARY_TOKENS: currentConfig.KIRO_CONTEXT_COMPRESSION_MAX_SUMMARY_TOKENS,
+        KIRO_CONTEXT_COMPRESSION_MESSAGE_CHARS: currentConfig.KIRO_CONTEXT_COMPRESSION_MESSAGE_CHARS,
         RATE_LIMIT_COOLDOWN_MS: currentConfig.RATE_LIMIT_COOLDOWN_MS,
         RATE_LIMIT_COOLDOWN_JITTER_MS: currentConfig.RATE_LIMIT_COOLDOWN_JITTER_MS,
         RATE_LIMIT_COOLDOWN_MAX_MS: currentConfig.RATE_LIMIT_COOLDOWN_MAX_MS,
@@ -190,6 +196,27 @@ async function _handleUpdateConfig(req, res, currentConfig, body) {
         }
         if (newConfig.REQUEST_BASE_DELAY !== undefined) currentConfig.REQUEST_BASE_DELAY = newConfig.REQUEST_BASE_DELAY;
         if (newConfig.CREDENTIAL_SWITCH_MAX_RETRIES !== undefined) currentConfig.CREDENTIAL_SWITCH_MAX_RETRIES = newConfig.CREDENTIAL_SWITCH_MAX_RETRIES;
+        if (newConfig.KIRO_CONTEXT_COMPRESSION_ENABLED !== undefined) currentConfig.KIRO_CONTEXT_COMPRESSION_ENABLED = parseBooleanConfig(newConfig.KIRO_CONTEXT_COMPRESSION_ENABLED);
+        if (newConfig.KIRO_CONTEXT_COMPRESSION_THRESHOLD_TOKENS !== undefined) {
+            const v = Number(newConfig.KIRO_CONTEXT_COMPRESSION_THRESHOLD_TOKENS);
+            if (Number.isInteger(v) && v > 0) currentConfig.KIRO_CONTEXT_COMPRESSION_THRESHOLD_TOKENS = v;
+        }
+        if (newConfig.KIRO_CONTEXT_COMPRESSION_TARGET_TOKENS !== undefined) {
+            const v = Number(newConfig.KIRO_CONTEXT_COMPRESSION_TARGET_TOKENS);
+            if (Number.isInteger(v) && v > 0) currentConfig.KIRO_CONTEXT_COMPRESSION_TARGET_TOKENS = v;
+        }
+        if (newConfig.KIRO_CONTEXT_COMPRESSION_KEEP_RECENT_MESSAGES !== undefined) {
+            const v = Number(newConfig.KIRO_CONTEXT_COMPRESSION_KEEP_RECENT_MESSAGES);
+            if (Number.isInteger(v) && v >= 2) currentConfig.KIRO_CONTEXT_COMPRESSION_KEEP_RECENT_MESSAGES = v;
+        }
+        if (newConfig.KIRO_CONTEXT_COMPRESSION_MAX_SUMMARY_TOKENS !== undefined) {
+            const v = Number(newConfig.KIRO_CONTEXT_COMPRESSION_MAX_SUMMARY_TOKENS);
+            if (Number.isInteger(v) && v > 0) currentConfig.KIRO_CONTEXT_COMPRESSION_MAX_SUMMARY_TOKENS = v;
+        }
+        if (newConfig.KIRO_CONTEXT_COMPRESSION_MESSAGE_CHARS !== undefined) {
+            const v = Number(newConfig.KIRO_CONTEXT_COMPRESSION_MESSAGE_CHARS);
+            if (Number.isInteger(v) && v > 0) currentConfig.KIRO_CONTEXT_COMPRESSION_MESSAGE_CHARS = v;
+        }
         if (newConfig.RATE_LIMIT_COOLDOWN_ENABLED !== undefined) currentConfig.RATE_LIMIT_COOLDOWN_ENABLED = parseBooleanConfig(newConfig.RATE_LIMIT_COOLDOWN_ENABLED);
         if (newConfig.RATE_LIMIT_COOLDOWN_MS !== undefined) {
             const v = Number(newConfig.RATE_LIMIT_COOLDOWN_MS);
@@ -340,6 +367,12 @@ async function _handleUpdateConfig(req, res, currentConfig, body) {
                 REQUEST_MAX_RETRIES: currentConfig.REQUEST_MAX_RETRIES,
                 REQUEST_BASE_DELAY: currentConfig.REQUEST_BASE_DELAY,
                 CREDENTIAL_SWITCH_MAX_RETRIES: currentConfig.CREDENTIAL_SWITCH_MAX_RETRIES,
+                KIRO_CONTEXT_COMPRESSION_ENABLED: currentConfig.KIRO_CONTEXT_COMPRESSION_ENABLED,
+                KIRO_CONTEXT_COMPRESSION_THRESHOLD_TOKENS: currentConfig.KIRO_CONTEXT_COMPRESSION_THRESHOLD_TOKENS,
+                KIRO_CONTEXT_COMPRESSION_TARGET_TOKENS: currentConfig.KIRO_CONTEXT_COMPRESSION_TARGET_TOKENS,
+                KIRO_CONTEXT_COMPRESSION_KEEP_RECENT_MESSAGES: currentConfig.KIRO_CONTEXT_COMPRESSION_KEEP_RECENT_MESSAGES,
+                KIRO_CONTEXT_COMPRESSION_MAX_SUMMARY_TOKENS: currentConfig.KIRO_CONTEXT_COMPRESSION_MAX_SUMMARY_TOKENS,
+                KIRO_CONTEXT_COMPRESSION_MESSAGE_CHARS: currentConfig.KIRO_CONTEXT_COMPRESSION_MESSAGE_CHARS,
                 RATE_LIMIT_COOLDOWN_ENABLED: currentConfig.RATE_LIMIT_COOLDOWN_ENABLED,
                 RATE_LIMIT_COOLDOWN_MS: currentConfig.RATE_LIMIT_COOLDOWN_MS,
                 RATE_LIMIT_COOLDOWN_JITTER_MS: currentConfig.RATE_LIMIT_COOLDOWN_JITTER_MS,

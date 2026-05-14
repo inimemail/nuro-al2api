@@ -82,3 +82,60 @@ describe('Kiro AWS event-stream parsing', () => {
         expect(parsed.remaining).toBe('');
     });
 });
+
+describe('Kiro context compression', () => {
+    test('compacts old messages while preserving the latest user turn', () => {
+        const service = new KiroApiService({
+            KIRO_CONTEXT_COMPRESSION_THRESHOLD_TOKENS: 1200,
+            KIRO_CONTEXT_COMPRESSION_TARGET_TOKENS: 900,
+            KIRO_CONTEXT_COMPRESSION_KEEP_RECENT_MESSAGES: 4,
+            KIRO_CONTEXT_COMPRESSION_MAX_SUMMARY_TOKENS: 256,
+            KIRO_CONTEXT_COMPRESSION_MESSAGE_CHARS: 220,
+        });
+        const oldText = 'old-context '.repeat(900);
+        const currentText = 'please answer using the latest requirement';
+        const requestBody = {
+            model: 'claude-sonnet-4-5',
+            messages: [
+                { role: 'user', content: [{ type: 'text', text: `${oldText}A` }] },
+                { role: 'assistant', content: [{ type: 'text', text: `${oldText}B` }] },
+                { role: 'user', content: [{ type: 'text', text: `${oldText}C` }] },
+                { role: 'assistant', content: [{ type: 'text', text: 'recent assistant reply' }] },
+                { role: 'user', content: [{ type: 'text', text: 'recent user followup' }] },
+                { role: 'assistant', content: [{ type: 'text', text: 'another recent assistant reply' }] },
+                { role: 'user', content: [{ type: 'text', text: currentText }] },
+            ],
+        };
+        const beforeTokens = service.estimateInputTokens(requestBody);
+
+        const result = service._compactKiroRequestContextIfNeeded(requestBody, 'claude-sonnet-4-5');
+        const afterTokens = service.estimateInputTokens(requestBody);
+
+        expect(result.compressed).toBe(true);
+        expect(afterTokens).toBeLessThan(beforeTokens);
+        expect(requestBody.messages[0].content[0].text).toContain('[Compressed earlier conversation]');
+        expect(requestBody.messages[requestBody.messages.length - 1].content[0].text).toBe(currentText);
+        expect(requestBody.messages.some(message =>
+            JSON.stringify(message.content).includes(`${oldText}A`)
+        )).toBe(false);
+    });
+
+    test('does not compact when disabled', () => {
+        const service = new KiroApiService({
+            KIRO_CONTEXT_COMPRESSION_ENABLED: false,
+            KIRO_CONTEXT_COMPRESSION_THRESHOLD_TOKENS: 10,
+        });
+        const requestBody = {
+            messages: [
+                { role: 'user', content: 'one '.repeat(100) },
+                { role: 'assistant', content: 'two '.repeat(100) },
+                { role: 'user', content: 'three '.repeat(100) },
+            ],
+        };
+
+        const result = service._compactKiroRequestContextIfNeeded(requestBody, 'claude-sonnet-4-5');
+
+        expect(result.compressed).toBe(false);
+        expect(requestBody.messages).toHaveLength(3);
+    });
+});
