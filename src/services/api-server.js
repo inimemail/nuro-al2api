@@ -54,10 +54,13 @@ import { HEALTH_CHECK } from '../utils/constants.js';
  * 
  * 服务器配置 / Server Configuration:
  * node src/api-server.js --host 0.0.0.0 --port 8080 --api-key your-secret-key
- * 
+ *
  * OpenAI 提供商 / OpenAI Provider:
  * node src/api-server.js --model-provider openai-custom --openai-api-key sk-xxx --openai-base-url https://api.openai.com/v1
- * 
+ *
+ * DeepSeek 提供商 / DeepSeek Provider:
+ * node src/api-server.js --model-provider openai-deepseek --deepseek-api-key sk-xxx
+ *
  * Claude 提供商 / Claude Provider:
  * node src/api-server.js --model-provider claude-custom --claude-api-key sk-ant-xxx --claude-base-url https://api.anthropic.com
  * 
@@ -94,6 +97,8 @@ import { HEALTH_CHECK } from '../utils/constants.js';
  * --model-provider <provider[,provider...]> AI 模型提供商 / AI model provider: openai-custom, claude-custom, gemini-cli-oauth, claude-kiro-oauth
  * --openai-api-key <key>             OpenAI API 密钥 / OpenAI API key (for openai-custom provider)
  * --openai-base-url <url>            OpenAI API 基础 URL / OpenAI API base URL (for openai-custom provider)
+ * --deepseek-api-key <key>          DeepSeek API 密钥 / DeepSeek API key (for openai-deepseek provider)
+ * --deepseek-base-url <url>         DeepSeek API 基础 URL / DeepSeek API base URL (default: https://api.deepseek.com)
  * --claude-api-key <key>             Claude API 密钥 / Claude API key (for claude-custom provider)
  * --claude-base-url <url>            Claude API 基础 URL / Claude API base URL (for claude-custom provider)
  * --gemini-oauth-creds-base64 <b64>  Gemini OAuth 凭据的 Base64 字符串 / Gemini OAuth credentials as Base64 string

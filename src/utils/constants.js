@@ -65,6 +65,7 @@ export const MODEL_PROVIDER = {
     CODEX_API: 'openai-codex-oauth',
     FORWARD_API: 'forward-api',
     GROK_WEB: 'grok-web',
+    DEEPSEEK_API: 'openai-deepseek',
     AUTO: 'auto',
 };
 

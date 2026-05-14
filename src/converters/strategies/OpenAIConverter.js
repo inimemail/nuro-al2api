@@ -45,6 +45,7 @@ export class OpenAIConverter extends BaseConverter {
         super('openai');
         // 创建 CodexConverter 实例用于委托
         this.codexConverter = new CodexConverter();
+        this.claudeStreamStates = new Map();
     }
 
     /**
@@ -90,10 +91,10 @@ export class OpenAIConverter extends BaseConverter {
     /**
      * 转换流式响应块
      */
-    convertStreamChunk(chunk, targetProtocol, model) {
+    convertStreamChunk(chunk, targetProtocol, model, requestId = null) {
         switch (targetProtocol) {
             case MODEL_PROTOCOL_PREFIX.CLAUDE:
-                return this.toClaudeStreamChunk(chunk, model);
+                return this.toClaudeStreamChunk(chunk, model, requestId);
             case MODEL_PROTOCOL_PREFIX.GEMINI:
                 return this.toGeminiStreamChunk(chunk, model);
             case MODEL_PROTOCOL_PREFIX.OPENAI_RESPONSES:
@@ -447,7 +448,7 @@ export class OpenAIConverter extends BaseConverter {
      * 这个方法实现了与 ClaudeConverter.toOpenAIStreamChunk 相反的转换逻辑
      * 将 OpenAI 的流式 chunk 转换为 Claude 的流式事件
      */
-    toClaudeStreamChunk(openaiChunk, model) {
+    toClaudeStreamChunk(openaiChunk, model, requestId = null) {
         if (!openaiChunk) return null;
 
         // 处理 OpenAI chunk 对象
@@ -460,6 +461,32 @@ export class OpenAIConverter extends BaseConverter {
             const delta = choice.delta;
             const finishReason = choice.finish_reason;
             const events = [];
+            const streamKey = requestId || openaiChunk.id || 'default';
+            const state = this.claudeStreamStates.get(streamKey) || {
+                messageStarted: false,
+                textStarted: false,
+                thinkingStarted: false,
+            };
+
+            if (!state.messageStarted) {
+                events.push({
+                    type: "message_start",
+                    message: {
+                        id: openaiChunk.id || `msg_${uuidv4()}`,
+                        type: "message",
+                        role: "assistant",
+                        content: [],
+                        model: model || openaiChunk.model || "unknown",
+                        stop_reason: null,
+                        stop_sequence: null,
+                        usage: {
+                            input_tokens: openaiChunk.usage?.prompt_tokens || 0,
+                            output_tokens: 0
+                        }
+                    }
+                });
+                state.messageStarted = true;
+            }
 
             // 注释部分是为了兼容claude code，但是不兼容cherry studio
             // 1. 处理 role (对应 message_start) 
@@ -524,6 +551,17 @@ export class OpenAIConverter extends BaseConverter {
 
             // 3. 处理 reasoning_content (对应 thinking 类型的 content_block)
             if (delta?.reasoning_content) {
+                if (!state.thinkingStarted) {
+                    events.push({
+                        type: "content_block_start",
+                        index: 0,
+                        content_block: {
+                            type: "thinking",
+                            thinking: ""
+                        }
+                    });
+                    state.thinkingStarted = true;
+                }
                 // 注意：这里可能需要先发送 content_block_start，但由于状态管理复杂，
                 // 我们假设调用方会处理这个逻辑
                 events.push({
@@ -538,6 +576,17 @@ export class OpenAIConverter extends BaseConverter {
 
             // 4. 处理普通文本 content (对应 text 类型的 content_block)
             if (delta?.content) {
+                if (!state.textStarted) {
+                    events.push({
+                        type: "content_block_start",
+                        index: 0,
+                        content_block: {
+                            type: "text",
+                            text: ""
+                        }
+                    });
+                    state.textStarted = true;
+                }
                 events.push({
                     type: "content_block_delta",
                     index: 0,
@@ -578,6 +627,9 @@ export class OpenAIConverter extends BaseConverter {
                 events.push({
                     type: "message_stop"
                 });
+                this.claudeStreamStates.delete(streamKey);
+            } else {
+                this.claudeStreamStates.set(streamKey, state);
             }
 
             return events.length > 0 ? events : null;

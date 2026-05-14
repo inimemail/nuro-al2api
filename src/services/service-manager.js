@@ -585,7 +585,8 @@ export async function getProviderStatus(config, options = {}) {
         'openai-iflow': 'IFLOW_TOKEN_FILE_PATH',
         'forward-api': 'FORWARD_BASE_URL',
         'grok-web': 'GROK_COOKIE_TOKEN',
-        'openai-codex-oauth': 'CODEX_OAUTH_CREDS_FILE_PATH'
+        'openai-codex-oauth': 'CODEX_OAUTH_CREDS_FILE_PATH',
+        'openai-deepseek': 'DEEPSEEK_API_KEY'
     };
     let providerPoolsSlim = [];
     let unhealthyProvideIdentifyList = [];

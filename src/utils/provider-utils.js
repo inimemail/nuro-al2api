@@ -89,6 +89,18 @@ export const PROVIDER_MAPPINGS = [
         displayName: 'Grok Web',
         needsProjectId: false,
         urlKeys: ['GROK_BASE_URL', 'GROK_CF_CLEARANCE', 'GROK_USER_AGENT']
+    },
+    {
+        // DeepSeek API 配置
+        dirName: 'deepseek',
+        patterns: ['configs/deepseek/', '/deepseek/'],
+        providerType: 'openai-deepseek',
+        credPathKey: 'DEEPSEEK_API_KEY',
+        defaultCheckModel: 'deepseek-v4-flash',
+        defaultCheckHealth: true,
+        displayName: 'DeepSeek API',
+        needsProjectId: false,
+        urlKeys: ['DEEPSEEK_BASE_URL']
     }
 ];
 

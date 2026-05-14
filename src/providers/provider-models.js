@@ -134,6 +134,12 @@ export const PROVIDER_MODELS = {
         'grok-imagine-1.0-edit',
         'grok-imagine-1.0-fast',
         'grok-imagine-1.0-fast-edit',
+    ],
+    'openai-deepseek': [
+        'deepseek-v4-flash',
+        'deepseek-v4-pro',
+        'deepseek-chat',
+        'deepseek-reasoner',
     ]
 };
 

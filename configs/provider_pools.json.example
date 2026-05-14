@@ -209,5 +209,21 @@
       "errorCount": 0,
       "lastErrorTime": null
     }
+  ],
+  "openai-deepseek": [
+    {
+      "customName": "DeepSeek节点1",
+      "DEEPSEEK_API_KEY": "sk-your-deepseek-api-key",
+      "DEEPSEEK_BASE_URL": "https://api.deepseek.com",
+      "checkModelName": "deepseek-v4-flash",
+      "checkHealth": true,
+      "uuid": "d33p5eek-0001-4000-a000-000000000001",
+      "isHealthy": true,
+      "isDisabled": false,
+      "lastUsed": null,
+      "usageCount": 0,
+      "errorCount": 0,
+      "lastErrorTime": null
+    }
   ]
 }

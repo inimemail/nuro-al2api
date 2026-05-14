@@ -185,7 +185,9 @@ export async function initializeConfig(args = process.argv.slice(2), configFileP
         { flag: '--scheduled-health-check-enabled', configKey: 'SCHEDULE_HEALTH_CHECK_ENABLED', type: 'bool' },
         { flag: '--scheduled-health-check-interval', configKey: 'SCHEDULE_HEALTH_CHECK_INTERVAL', type: 'int' },
         { flag: '--no-ui',                configKey: 'UI_ENABLED',            type: 'flag', value: false },
-        { flag: '--ui',                   configKey: 'UI_ENABLED',            type: 'bool' }
+        { flag: '--ui',                   configKey: 'UI_ENABLED',            type: 'bool' },
+        { flag: '--deepseek-api-key',     configKey: 'DEEPSEEK_API_KEY',      type: 'string' },
+        { flag: '--deepseek-base-url',    configKey: 'DEEPSEEK_BASE_URL',     type: 'string' }
     ];
 
     // Parse command-line arguments using definitions

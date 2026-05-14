@@ -9,6 +9,7 @@ import { IFlowApiService } from './openai/iflow-core.js';
 import { CodexApiService } from './openai/codex-core.js';
 import { ForwardApiService } from './forward/forward-core.js';
 import { GrokApiService } from './grok/grok-core.js';
+import { DeepSeekApiService } from './openai/deepseek-core.js';
 import { MODEL_PROVIDER } from '../utils/constants.js';
 import logger from '../utils/logger.js';
 
@@ -700,6 +701,38 @@ export class GrokApiServiceAdapter extends ApiServiceAdapter {
     }
 }
 
+// DeepSeek API 服务适配器
+export class DeepSeekApiServiceAdapter extends ApiServiceAdapter {
+    constructor(config) {
+        super();
+        this.deepSeekApiService = new DeepSeekApiService(config);
+    }
+
+    async generateContent(model, requestBody) {
+        return this.deepSeekApiService.generateContent(model, requestBody);
+    }
+
+    async *generateContentStream(model, requestBody) {
+        yield* this.deepSeekApiService.generateContentStream(model, requestBody);
+    }
+
+    async listModels() {
+        return this.deepSeekApiService.listModels();
+    }
+
+    async refreshToken() {
+        return false;
+    }
+
+    async forceRefreshToken() {
+        return false;
+    }
+
+    isExpiryDateNear() {
+        return false;
+    }
+}
+
 // 注册所有内置适配器
 registerAdapter(MODEL_PROVIDER.OPENAI_CUSTOM, OpenAIApiServiceAdapter);
 registerAdapter(MODEL_PROVIDER.OPENAI_CUSTOM_RESPONSES, OpenAIResponsesApiServiceAdapter);
@@ -709,6 +742,7 @@ registerAdapter(MODEL_PROVIDER.ANTIGRAVITY, AntigravityApiServiceAdapter);
 registerAdapter(MODEL_PROVIDER.KIRO_API, KiroApiServiceAdapter);
 registerAdapter(MODEL_PROVIDER.CODEX_API, CodexApiServiceAdapter);
 registerAdapter(MODEL_PROVIDER.GROK_WEB, GrokApiServiceAdapter);
+registerAdapter(MODEL_PROVIDER.DEEPSEEK_API, DeepSeekApiServiceAdapter);
 // registerAdapter(MODEL_PROVIDER.FORWARD_API, ForwardApiServiceAdapter);
 // registerAdapter(MODEL_PROVIDER.QWEN_API, QwenApiServiceAdapter);
 // registerAdapter(MODEL_PROVIDER.IFLOW_API, IFlowApiServiceAdapter);
