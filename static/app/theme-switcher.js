@@ -69,7 +69,7 @@ function updateMetaThemeColor(theme) {
     const metaThemeColor = document.querySelector('meta[name="theme-color"]');
     if (metaThemeColor) {
         // 暗黑主题使用深色，亮色主题使用主色调
-        metaThemeColor.setAttribute('content', theme === THEME_DARK ? '#1f2937' : '#059669');
+        metaThemeColor.setAttribute('content', theme === THEME_DARK ? '#1f2937' : '#f97316');
     }
 }
 
