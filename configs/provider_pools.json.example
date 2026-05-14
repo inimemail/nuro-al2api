@@ -215,6 +215,8 @@
       "customName": "DeepSeek节点1",
       "DEEPSEEK_API_KEY": "sk-your-deepseek-api-key",
       "DEEPSEEK_BASE_URL": "https://api.deepseek.com",
+      "DEEPSEEK_RESPONSE_CACHE_ENABLED": true,
+      "DEEPSEEK_RESPONSE_CACHE_TTL_MS": 300000,
       "checkModelName": "deepseek-v4-flash",
       "checkHealth": true,
       "uuid": "d33p5eek-0001-4000-a000-000000000001",

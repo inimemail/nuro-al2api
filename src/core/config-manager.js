@@ -130,6 +130,8 @@ export async function initializeConfig(args = process.argv.slice(2), configFileP
         LOG_INCLUDE_TIMESTAMP: true,
         LOG_MAX_FILE_SIZE: 10485760,
         LOG_MAX_FILES: 10,
+        DEEPSEEK_RESPONSE_CACHE_ENABLED: true,
+        DEEPSEEK_RESPONSE_CACHE_TTL_MS: 300000,
         TLS_SIDECAR_ENABLED: false, // 启用 Go uTLS sidecar（需要编译 tls-sidecar 二进制）
         TLS_SIDECAR_ENABLED_PROVIDERS: [], // 启用 TLS Sidecar 的提供商列表
         TLS_SIDECAR_PORT: 9090,     // sidecar 监听端口
@@ -191,7 +193,9 @@ export async function initializeConfig(args = process.argv.slice(2), configFileP
         { flag: '--no-ui',                configKey: 'UI_ENABLED',            type: 'flag', value: false },
         { flag: '--ui',                   configKey: 'UI_ENABLED',            type: 'bool' },
         { flag: '--deepseek-api-key',     configKey: 'DEEPSEEK_API_KEY',      type: 'string' },
-        { flag: '--deepseek-base-url',    configKey: 'DEEPSEEK_BASE_URL',     type: 'string' }
+        { flag: '--deepseek-base-url',    configKey: 'DEEPSEEK_BASE_URL',     type: 'string' },
+        { flag: '--deepseek-response-cache-enabled', configKey: 'DEEPSEEK_RESPONSE_CACHE_ENABLED', type: 'bool' },
+        { flag: '--deepseek-response-cache-ttl-ms', configKey: 'DEEPSEEK_RESPONSE_CACHE_TTL_MS', type: 'int' }
     ];
 
     // Parse command-line arguments using definitions

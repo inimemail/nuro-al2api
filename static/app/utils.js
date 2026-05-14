@@ -203,6 +203,8 @@ function getFieldLabel(key) {
         'OPENAI_BASE_URL': 'OpenAI Base URL',
         'DEEPSEEK_API_KEY': 'DeepSeek API Key',
         'DEEPSEEK_BASE_URL': 'DeepSeek Base URL',
+        'DEEPSEEK_RESPONSE_CACHE_ENABLED': 'DeepSeek Response Cache',
+        'DEEPSEEK_RESPONSE_CACHE_TTL_MS': 'DeepSeek Cache TTL (ms)',
         'CLAUDE_API_KEY': 'Claude API Key',
         'CLAUDE_BASE_URL': 'Claude Base URL',
         'PROJECT_ID': t('modal.provider.field.projectId'),
@@ -288,6 +290,18 @@ function getProviderTypeFields(providerType) {
                 label: 'DeepSeek Base URL',
                 type: 'text',
                 placeholder: 'https://api.deepseek.com'
+            },
+            {
+                id: 'DEEPSEEK_RESPONSE_CACHE_ENABLED',
+                label: 'DeepSeek Response Cache',
+                type: 'text',
+                placeholder: 'true'
+            },
+            {
+                id: 'DEEPSEEK_RESPONSE_CACHE_TTL_MS',
+                label: 'DeepSeek Cache TTL (ms)',
+                type: 'number',
+                placeholder: '300000'
             }
         ],
         'claude-custom': [

@@ -1496,6 +1496,10 @@ export async function handleContentGenerationRequest(req, res, service, endpoint
     if (CONFIG._monitorRequestId) {
         processedRequestBody._monitorRequestId = CONFIG._monitorRequestId;
     }
+
+    if (CONFIG._clientCacheNamespace) {
+        processedRequestBody._clientCacheNamespace = CONFIG._clientCacheNamespace;
+    }
     
     // 将 requestBaseUrl 注入到 requestBody 中，以便在转换器中使用
     if (CONFIG.requestBaseUrl) {

@@ -2289,6 +2289,7 @@ export class ProviderPoolManager {
                 // 尝试将 signal 注入请求体，供支持的适配器使用
                 const requestWithSignal = {
                     ...healthCheckRequest,
+                    _deepseekBypassResponseCache: true,
                     // signal: abortController.signal
                 };
 

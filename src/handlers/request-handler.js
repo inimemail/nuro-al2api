@@ -11,7 +11,7 @@ import { getRegisteredProviders, isRegisteredProvider, normalizeRegisteredProvid
 import { countTokensAnthropic } from '../utils/token-utils.js';
 import { PROMPT_LOG_FILENAME } from '../core/config-manager.js';
 import { getPluginManager } from '../core/plugin-manager.js';
-import { randomUUID } from 'crypto';
+import { createHash, randomUUID } from 'crypto';
 import { handleGrokAssetsProxy } from '../utils/grok-assets-proxy.js';
 
 /**
@@ -56,6 +56,14 @@ export function createRequestHandler(config, providerPoolManager) {
             // Deep copy the config for each request to allow dynamic modification
             const currentConfig = deepmerge({}, config);
             currentConfig._monitorRequestId = requestId;
+            currentConfig._clientCacheNamespace = createHash('sha256')
+                .update([
+                    clientIp || '',
+                    req.headers.authorization || '',
+                    req.headers['x-api-key'] || '',
+                    req.headers['x-goog-api-key'] || ''
+                ].join('|'))
+                .digest('hex');
             
             // 计算当前请求的基础 URL
             const protocol = req.socket.encrypted || req.headers['x-forwarded-proto'] === 'https' ? 'https' : 'http';
