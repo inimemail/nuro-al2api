@@ -22,7 +22,8 @@ function normalizeConfiguredProviders(config) {
         }
 
         // 1. 优先尝试精确匹配基础类型
-        const matched = ALL_MODEL_PROVIDERS.find((provider) => provider.toLowerCase() === trimmed.toLowerCase());
+        const normalized = trimmed === 'openai-deepseek' ? MODEL_PROVIDER.DEEPSEEK_API : trimmed;
+        const matched = ALL_MODEL_PROVIDERS.find((provider) => provider.toLowerCase() === normalized.toLowerCase());
         if (matched) {
             if (!dedupedProviders.includes(matched)) {
                 dedupedProviders.push(matched);
@@ -32,12 +33,12 @@ function normalizeConfiguredProviders(config) {
 
         // 2. 尝试前缀匹配 (支持带后缀的自定义分组，例如 openai-custom-1)
         const prefixMatch = ALL_MODEL_PROVIDERS.find((provider) => 
-            provider !== 'auto' && trimmed.toLowerCase().startsWith(provider.toLowerCase() + '-')
+            provider !== 'auto' && normalized.toLowerCase().startsWith(provider.toLowerCase() + '-')
         );
         
         if (prefixMatch) {
-            if (!dedupedProviders.includes(trimmed)) {
-                dedupedProviders.push(trimmed);
+            if (!dedupedProviders.includes(normalized)) {
+                dedupedProviders.push(normalized);
             }
             return;
         }

@@ -19,6 +19,41 @@ import { MODEL_PROVIDER } from '../utils/constants.js';
 // 存储 ProviderPoolManager 实例
 let providerPoolManager = null;
 
+function getConfiguredProviderPool(config, providerType) {
+    const pool = config.providerPools?.[providerType];
+    if (Array.isArray(pool)) {
+        return pool;
+    }
+
+    if (providerType === MODEL_PROVIDER.DEEPSEEK_API) {
+        const legacyPool = config.providerPools?.['openai-deepseek'];
+        return Array.isArray(legacyPool) ? legacyPool : null;
+    }
+
+    return null;
+}
+
+function hasConfiguredProviderPool(config, providerType) {
+    const pool = getConfiguredProviderPool(config, providerType);
+    if (pool?.length > 0) {
+        return true;
+    }
+
+    const statusPool = providerPoolManager?.providerStatus?.[providerType];
+    return Array.isArray(statusPool) && statusPool.length > 0;
+}
+
+function isPoolOnlyProvider(providerType) {
+    return PROVIDER_MAPPINGS.some(m =>
+        providerType === m.providerType ||
+        providerType?.startsWith(`${m.providerType}-`)
+    );
+}
+
+function shouldUseProviderPool(config, providerType) {
+    return hasConfiguredProviderPool(config, providerType) || isPoolOnlyProvider(providerType);
+}
+
 /**
  * 扫描 configs 目录并自动关联未关联的配置文件到对应的提供商
  * @param {Object} config - 服务器配置对象
@@ -98,7 +133,7 @@ export async function autoLinkProviderConfigs(config, options = {}) {
                 providers.forEach(p => {
                     // 获取凭据路径键（支持 _CREDS_FILE_PATH 和 _TOKEN_FILE_PATH 两种格式）
                     const credKey = Object.keys(p).find(k =>
-                        k.endsWith('_CREDS_FILE_PATH') || k.endsWith('_TOKEN_FILE_PATH')
+                        k.endsWith('_CREDS_FILE_PATH') || k.endsWith('_TOKEN_FILE_PATH') || k.endsWith('_API_KEY')
                     );
                     if (credKey) {
                         logger.info(`    - ${p[credKey]}`);
@@ -414,8 +449,8 @@ export async function getApiService(config, requestedModel = null, options = {})
     if (effectiveProvider === MODEL_PROVIDER.AUTO && !actualModelName) return null;
 
     let serviceConfig = config;
-    const isPoolable = PROVIDER_MAPPINGS.some(m => m.providerType === config.MODEL_PROVIDER);
-    if (providerPoolManager && ((config.providerPools && config.providerPools[config.MODEL_PROVIDER]) || isPoolable)) {
+    const shouldUsePool = shouldUseProviderPool(config, config.MODEL_PROVIDER);
+    if (providerPoolManager && shouldUsePool) {
         // 如果有号池管理器，并且当前模型提供者类型有对应的号池（或属于号池类型提供商），则从号池中选择一个提供者配置
         // selectProvider 现在是异步的，使用链式锁确保并发安全
         const selectedProviderConfig = await providerPoolManager.selectProvider(config.MODEL_PROVIDER, actualModelName, { ...options, skipUsageCount: true });
@@ -462,8 +497,8 @@ export async function getApiServiceWithFallback(config, requestedModel = null, o
     let selectedUuid = null;
     let actualModel = actualModelName;
     
-    const isPoolable = PROVIDER_MAPPINGS.some(m => m.providerType === config.MODEL_PROVIDER);
-    if (providerPoolManager && ((config.providerPools && config.providerPools[config.MODEL_PROVIDER]) || isPoolable)) {
+    const shouldUsePool = shouldUseProviderPool(config, config.MODEL_PROVIDER);
+    if (providerPoolManager && shouldUsePool) {
         // selectProviderWithFallback 现在是异步的，使用链式锁确保并发安全
         // 如果开启了并发限制，则使用 acquireSlot 进行选择和占位
         const useAcquire = options.acquireSlot === true;
@@ -586,7 +621,7 @@ export async function getProviderStatus(config, options = {}) {
         'forward-api': 'FORWARD_BASE_URL',
         'grok-web': 'GROK_COOKIE_TOKEN',
         'openai-codex-oauth': 'CODEX_OAUTH_CREDS_FILE_PATH',
-        'openai-deepseek': 'DEEPSEEK_API_KEY'
+        'DeepSeek': 'DEEPSEEK_API_KEY'
     };
     let providerPoolsSlim = [];
     let unhealthyProvideIdentifyList = [];

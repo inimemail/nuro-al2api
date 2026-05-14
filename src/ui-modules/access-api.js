@@ -1,19 +1,26 @@
 import { existsSync, readFileSync } from 'fs';
 
+function normalizeProviderType(providerType) {
+    return providerType === 'openai-deepseek' ? 'DeepSeek' : providerType;
+}
+
 function getProviderPoolsFilePath(currentConfig) {
     return currentConfig.PROVIDER_POOLS_FILE_PATH || 'configs/provider_pools.json';
 }
 
 function getDefaultProviders(currentConfig) {
     if (Array.isArray(currentConfig.DEFAULT_MODEL_PROVIDERS) && currentConfig.DEFAULT_MODEL_PROVIDERS.length > 0) {
-        return currentConfig.DEFAULT_MODEL_PROVIDERS.filter(Boolean);
+        return currentConfig.DEFAULT_MODEL_PROVIDERS
+            .filter(Boolean)
+            .map(normalizeProviderType);
     }
 
     if (typeof currentConfig.MODEL_PROVIDER === 'string' && currentConfig.MODEL_PROVIDER.trim()) {
         return currentConfig.MODEL_PROVIDER
             .split(',')
             .map(item => item.trim())
-            .filter(Boolean);
+            .filter(Boolean)
+            .map(normalizeProviderType);
     }
 
     return [];
@@ -24,7 +31,8 @@ function collectProviderStatus(currentConfig, providerPoolManager) {
 
     if (providerPoolManager?.providerStatus) {
         for (const [type, providers] of Object.entries(providerPoolManager.providerStatus)) {
-            providerStatus[type] = providers.map(provider => ({
+            const normalizedType = normalizeProviderType(type);
+            providerStatus[normalizedType] = providers.map(provider => ({
                 ...provider.config,
                 activeRequests: provider.state?.activeCount || 0,
                 waitingRequests: provider.state?.waitingCount || 0
@@ -37,8 +45,9 @@ function collectProviderStatus(currentConfig, providerPoolManager) {
         try {
             const poolsData = JSON.parse(readFileSync(filePath, 'utf-8'));
             for (const [type, providers] of Object.entries(poolsData)) {
-                if (!providerStatus[type] || providerStatus[type].length === 0) {
-                    providerStatus[type] = Array.isArray(providers) ? providers : [];
+                const normalizedType = normalizeProviderType(type);
+                if (!providerStatus[normalizedType] || providerStatus[normalizedType].length === 0) {
+                    providerStatus[normalizedType] = Array.isArray(providers) ? providers : [];
                 }
             }
         } catch (error) {

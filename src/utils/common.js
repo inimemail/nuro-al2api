@@ -387,6 +387,14 @@ function appendCustomModelsToModelList(clientModelList, customEntries, providerT
  * @returns {string} The protocol prefix (e.g., 'gemini', 'openai', 'claude').
  */
 export function getProtocolPrefix(provider) {
+    if (
+        provider === MODEL_PROVIDER.DEEPSEEK_API ||
+        provider === 'openai-deepseek' ||
+        provider?.startsWith(`${MODEL_PROVIDER.DEEPSEEK_API}-`)
+    ) {
+        return MODEL_PROTOCOL_PREFIX.OPENAI;
+    }
+
     // Special case for Codex - it needs its own protocol
     if (provider === 'openai-codex-oauth') {
         return 'codex';

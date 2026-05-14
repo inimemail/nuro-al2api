@@ -573,6 +573,8 @@ function getFilteredProviders() {
             p.IFLOW_OAUTH_CREDS_FILE_PATH,
             p.CODEX_OAUTH_CREDS_FILE_PATH,
             p.GROK_COOKIE_TOKEN,
+            p.DEEPSEEK_API_KEY,
+            p.DEEPSEEK_BASE_URL,
             p.FORWARD_API_KEY,
             p.checkModelName
         ];
@@ -1273,6 +1275,8 @@ function getFieldOrder(provider) {
             providerType = 'openai-codex-oauth';
         } else if (provider.GROK_COOKIE_TOKEN) {
             providerType = 'grok-web';
+        } else if (provider.DEEPSEEK_API_KEY) {
+            providerType = 'DeepSeek';
         } else if (provider.FORWARD_API_KEY) {
             providerType = 'forward-api';
         }

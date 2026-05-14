@@ -14,6 +14,10 @@ import {
 import { broadcastEvent } from '../ui-modules/event-broadcast.js';
 import { ENDPOINT_TYPE } from '../utils/common.js';
 
+function normalizeProviderType(providerType) {
+    return providerType === 'openai-deepseek' ? MODEL_PROVIDER.DEEPSEEK_API : providerType;
+}
+
 function getCustomModelAliasesForProvider(config, providerType) {
     const customModels = Array.isArray(config?.customModels) ? config.customModels : [];
     return new Set(
@@ -59,10 +63,11 @@ export class ProviderPoolManager {
         'openaiResponses-custom': 'gpt-4o-mini',
         'forward-api': 'gpt-4o-mini',
         'grok-web': 'grok-4.1-mini',
+        'DeepSeek': 'deepseek-v4-flash',
     };
 
     constructor(providerPools, options = {}) {
-        this.providerPools = providerPools;
+        this.providerPools = this._normalizeProviderPools(providerPools || {});
         this.globalConfig = options.globalConfig || {}; // 存储全局配置
         this.providerStatus = {}; // Tracks health and usage for each provider instance
         this.roundRobinIndex = {}; // Tracks the current index for round-robin selection for each provider type
@@ -113,6 +118,20 @@ export class ProviderPoolManager {
         this._selectionSequence = 0;
  
         this.initializeProviderStatus();
+    }
+
+    _normalizeProviderPools(providerPools = {}) {
+        const normalizedPools = {};
+        for (const [providerType, providers] of Object.entries(providerPools)) {
+            const normalizedType = normalizeProviderType(providerType);
+            if (!normalizedPools[normalizedType]) {
+                normalizedPools[normalizedType] = [];
+            }
+            if (Array.isArray(providers)) {
+                normalizedPools[normalizedType].push(...providers);
+            }
+        }
+        return normalizedPools;
     }
 
     /**
@@ -759,6 +778,7 @@ export class ProviderPoolManager {
      * @param {boolean} syncFromConfig - 是否强制从配置同步统计数据（不保留内存中的旧数据）
      */
     initializeProviderStatus(syncFromConfig = false) {
+        this.providerPools = this._normalizeProviderPools(this.providerPools || {});
         const oldFullStatus = this.providerStatus || {};
         const isColdStart = Object.keys(oldFullStatus).length === 0;
         this.providerStatus = {}; // Tracks health and usage for each provider instance
@@ -1443,7 +1463,9 @@ export class ProviderPoolManager {
                         } else {
                             // 如果该提供商是属于号池类型的提供商（在 PROVIDER_MAPPINGS 中），且号池为空，则不应尝试读取全局配置
                             const { PROVIDER_MAPPINGS } = await import('../utils/provider-utils.js');
-                            const isPoolable = PROVIDER_MAPPINGS.some(m => m.providerType === providerType);
+                            const isPoolable = providerType === MODEL_PROVIDER.DEEPSEEK_API ||
+                                providerType?.startsWith(`${MODEL_PROVIDER.DEEPSEEK_API}-`) ||
+                                PROVIDER_MAPPINGS.some(m => m.providerType === providerType);
                             if (isPoolable) {
                                 this._log('debug', `Skipping model fetch for poolable provider ${providerType} with empty pool to avoid reading default config.`);
                                 continue;

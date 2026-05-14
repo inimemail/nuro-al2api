@@ -210,7 +210,7 @@
       "lastErrorTime": null
     }
   ],
-  "openai-deepseek": [
+  "DeepSeek": [
     {
       "customName": "DeepSeek节点1",
       "DEEPSEEK_API_KEY": "sk-your-deepseek-api-key",

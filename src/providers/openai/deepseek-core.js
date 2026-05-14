@@ -123,14 +123,11 @@ export class DeepSeekApiService extends OpenAIApiService {
         } catch (error) {
             const status = error.response?.status;
             logger.error(`[DeepSeek] Error listing models (Status: ${status}):`, error.message);
-            // Fall back to the current official models plus deprecated aliases.
             return {
                 object: 'list',
                 data: [
                     { id: 'deepseek-v4-flash', object: 'model', owned_by: 'deepseek' },
                     { id: 'deepseek-v4-pro', object: 'model', owned_by: 'deepseek' },
-                    { id: 'deepseek-chat', object: 'model', owned_by: 'deepseek' },
-                    { id: 'deepseek-reasoner', object: 'model', owned_by: 'deepseek' },
                 ]
             };
         }

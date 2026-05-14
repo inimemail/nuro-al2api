@@ -11,6 +11,7 @@ const recommendedModelMap = {
     'claude-custom': 'claude-sonnet-4-6',
     'claude-kiro-oauth': 'claude-sonnet-4-6',
     'openai-custom': 'gpt-4o',
+    'DeepSeek': 'deepseek-v4-flash',
     'openai-qwen-oauth': 'qwen3-coder-plus',
     'openai-iflow': 'qwen3-max',
     'openai-codex-oauth': 'gpt-5',

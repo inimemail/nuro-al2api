@@ -59,6 +59,11 @@ function getBaseProviderConfigs() {
             name: t('dashboard.routing.nodeName.grok'), 
             icon: 'fa-user-secret'
         },
+        {
+            id: 'DeepSeek',
+            name: 'DeepSeek',
+            icon: 'fa-water'
+        },
         { 
             id: 'openai-custom', 
             name: t('dashboard.routing.nodeName.openai'), 
@@ -84,6 +89,9 @@ function getBaseProviderConfigs() {
  */
 function getProviderConfigs(supportedProviders = []) {
     const baseConfigs = getBaseProviderConfigs();
+    supportedProviders = [...new Set(
+        supportedProviders.map(providerId => providerId === 'openai-deepseek' ? 'DeepSeek' : providerId)
+    )];
 
     const result = [];
     const usedIds = new Set();
@@ -106,7 +114,7 @@ function getProviderConfigs(supportedProviders = []) {
             result.push({
                 ...baseConfig,
                 id: providerId,
-                name: `${baseConfig.name} (${suffix})`,
+                name: suffix ? `${baseConfig.name} (${suffix})` : baseConfig.name,
                 visible: true
             });
             usedIds.add(providerId);
@@ -190,6 +198,8 @@ function getFieldLabel(key) {
         'queueLimit': t('modal.provider.queueLimit') + ' ' + t('config.optional'),
         'OPENAI_API_KEY': 'OpenAI API Key',
         'OPENAI_BASE_URL': 'OpenAI Base URL',
+        'DEEPSEEK_API_KEY': 'DeepSeek API Key',
+        'DEEPSEEK_BASE_URL': 'DeepSeek Base URL',
         'CLAUDE_API_KEY': 'Claude API Key',
         'CLAUDE_BASE_URL': 'Claude Base URL',
         'PROJECT_ID': t('modal.provider.field.projectId'),
@@ -230,6 +240,9 @@ function getFieldLabel(key) {
  * @returns {Array} 字段配置数组
  */
 function getProviderTypeFields(providerType) {
+    if (providerType === 'openai-deepseek') {
+        providerType = 'DeepSeek';
+    }
     // 基础配置字段定义
     const fieldConfigs = {
         'openai-custom': [
@@ -258,6 +271,20 @@ function getProviderTypeFields(providerType) {
                 label: 'OpenAI Base URL',
                 type: 'text',
                 placeholder: 'https://api.openai.com/v1'
+            }
+        ],
+        'DeepSeek': [
+            {
+                id: 'DEEPSEEK_API_KEY',
+                label: t('modal.provider.field.apiKey'),
+                type: 'password',
+                placeholder: 'sk-...'
+            },
+            {
+                id: 'DEEPSEEK_BASE_URL',
+                label: 'DeepSeek Base URL',
+                type: 'text',
+                placeholder: 'https://api.deepseek.com'
             }
         ],
         'claude-custom': [

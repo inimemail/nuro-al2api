@@ -100,18 +100,36 @@ function getProviderPoolsFilePath(currentConfig) {
     return currentConfig.PROVIDER_POOLS_FILE_PATH || 'configs/provider_pools.json';
 }
 
+function normalizeProviderType(providerType) {
+    return providerType === 'openai-deepseek' ? 'DeepSeek' : providerType;
+}
+
+function normalizeProviderPools(providerPools = {}) {
+    const normalizedPools = {};
+    for (const [providerType, providers] of Object.entries(providerPools || {})) {
+        const normalizedType = normalizeProviderType(providerType);
+        if (!normalizedPools[normalizedType]) {
+            normalizedPools[normalizedType] = [];
+        }
+        if (Array.isArray(providers)) {
+            normalizedPools[normalizedType].push(...providers);
+        }
+    }
+    return normalizedPools;
+}
+
 function loadProviderPools(currentConfig, providerPoolManager) {
     const filePath = getProviderPoolsFilePath(currentConfig);
 
     if (providerPoolManager?.providerPools) {
-        return providerPoolManager.providerPools;
+        return normalizeProviderPools(providerPoolManager.providerPools);
     }
 
     if (!existsSync(filePath)) {
         return {};
     }
 
-    return JSON.parse(readFileSync(filePath, 'utf-8'));
+    return normalizeProviderPools(JSON.parse(readFileSync(filePath, 'utf-8')));
 }
 
 function getManagedSupportedModels(providerType, providers = []) {
@@ -125,7 +143,11 @@ async function persistProviderStatusToFile(currentConfig, providerPoolManager) {
     const providerPools = {};
 
     for (const providerType in providerPoolManager.providerStatus) {
-        providerPools[providerType] = providerPoolManager.providerStatus[providerType].map(providerStatus => providerStatus.config);
+        const normalizedType = normalizeProviderType(providerType);
+        if (!providerPools[normalizedType]) {
+            providerPools[normalizedType] = [];
+        }
+        providerPools[normalizedType].push(...providerPoolManager.providerStatus[providerType].map(providerStatus => providerStatus.config));
     }
 
     await atomicWriteFile(filePath, JSON.stringify(providerPools, null, 2), 'utf-8');
@@ -228,11 +250,15 @@ export async function handleGetProviders(req, res, currentConfig, providerPoolMa
     const providerStatus = {};
     if (providerPoolManager) {
         for (const [type, providers] of Object.entries(providerPoolManager.providerStatus)) {
-            providerStatus[type] = providers.map(p => ({
+            const normalizedType = normalizeProviderType(type);
+            if (!providerStatus[normalizedType]) {
+                providerStatus[normalizedType] = [];
+            }
+            providerStatus[normalizedType].push(...providers.map(p => ({
                 ...p.config,
                 activeRequests: p.state?.activeCount || 0,
                 waitingRequests: p.state?.waitingCount || 0
-            }));
+            })));
         }
     }
     
@@ -240,7 +266,7 @@ export async function handleGetProviders(req, res, currentConfig, providerPoolMa
     const filePath = currentConfig.PROVIDER_POOLS_FILE_PATH || 'configs/provider_pools.json';
     try {
         if (existsSync(filePath)) {
-            const poolsData = JSON.parse(readFileSync(filePath, 'utf-8'));
+            const poolsData = normalizeProviderPools(JSON.parse(readFileSync(filePath, 'utf-8')));
             poolTypes = Object.keys(poolsData);
             poolTypes.forEach(type => {
                 // 如果管理器中没有该组，或者该组是空的，则从文件中补全
@@ -277,15 +303,10 @@ export async function handleGetProviders(req, res, currentConfig, providerPoolMa
  * 获取特定提供商类型的详细信息
  */
 export async function handleGetProviderType(req, res, currentConfig, providerPoolManager, providerType) {
+    providerType = normalizeProviderType(providerType);
     let providerPools = {};
-    const filePath = currentConfig.PROVIDER_POOLS_FILE_PATH || 'configs/provider_pools.json';
     try {
-        if (providerPoolManager && providerPoolManager.providerPools) {
-            providerPools = providerPoolManager.providerPools;
-        } else if (filePath && existsSync(filePath)) {
-            const poolsData = JSON.parse(readFileSync(filePath, 'utf-8'));
-            providerPools = poolsData;
-        }
+        providerPools = loadProviderPools(currentConfig, providerPoolManager);
     } catch (error) {
         logger.warn('[UI API] Failed to load provider pools:', error.message);
     }
@@ -311,9 +332,9 @@ export async function handleGetSupportedProviders(req, res, currentConfig, provi
     const filePath = currentConfig.PROVIDER_POOLS_FILE_PATH || 'configs/provider_pools.json';
     try {
         if (providerPoolManager && providerPoolManager.providerPools) {
-            poolTypes = Object.keys(providerPoolManager.providerPools);
+            poolTypes = Object.keys(normalizeProviderPools(providerPoolManager.providerPools));
         } else if (filePath && existsSync(filePath)) {
-            const poolsData = JSON.parse(readFileSync(filePath, 'utf-8'));
+            const poolsData = normalizeProviderPools(JSON.parse(readFileSync(filePath, 'utf-8')));
             poolTypes = Object.keys(poolsData);
         }
     } catch (error) {
@@ -368,6 +389,7 @@ export async function handleGetProviderModels(req, res, currentConfig, providerP
  * 获取特定提供商类型的可用模型
  */
 export async function handleGetProviderTypeModels(req, res, currentConfig, providerPoolManager, providerType) {
+    providerType = normalizeProviderType(providerType);
     let models = getProviderModels(providerType);
     if (usesManagedModelList(providerType)) {
         try {
@@ -392,6 +414,7 @@ export async function handleGetProviderTypeModels(req, res, currentConfig, provi
  * Detect available models for a specific provider node.
  */
 export async function handleDetectProviderModels(req, res, currentConfig, providerPoolManager, providerType, providerUuid) {
+    providerType = normalizeProviderType(providerType);
     try {
         if (!usesManagedModelList(providerType)) {
             res.writeHead(400, { 'Content-Type': 'application/json' });
@@ -464,7 +487,8 @@ export async function handleAddProvider(req, res, currentConfig, providerPoolMan
 }
 async function _handleAddProvider(req, res, currentConfig, providerPoolManager, body) {
     try {
-        const { providerType, providerConfig } = body;
+        const { providerConfig } = body;
+        const providerType = normalizeProviderType(body.providerType);
 
         if (!providerType || !providerConfig) {
             res.writeHead(400, { 'Content-Type': 'application/json' });
@@ -491,7 +515,7 @@ async function _handleAddProvider(req, res, currentConfig, providerPoolManager, 
         if (existsSync(filePath)) {
             try {
                 const fileContent = readFileSync(filePath, 'utf-8');
-                providerPools = JSON.parse(fileContent);
+                providerPools = normalizeProviderPools(JSON.parse(fileContent));
             } catch (readError) {
                 logger.warn('[UI API] Failed to read existing provider pools:', readError.message);
             }
@@ -556,6 +580,7 @@ async function _handleAddProvider(req, res, currentConfig, providerPoolManager, 
  * 更新特定提供商配置
  */
 export async function handleUpdateProvider(req, res, currentConfig, providerPoolManager, providerType, providerUuid) {
+    providerType = normalizeProviderType(providerType);
     try {
         const body = await getRequestBody(req);
         const filePath = currentConfig.PROVIDER_POOLS_FILE_PATH || 'configs/provider_pools.json';
@@ -568,6 +593,7 @@ export async function handleUpdateProvider(req, res, currentConfig, providerPool
 }
 async function _handleUpdateProvider(req, res, currentConfig, providerPoolManager, providerType, providerUuid, body) {
     try {
+        providerType = normalizeProviderType(providerType);
         const { providerConfig } = body;
 
         if (!providerConfig) {
@@ -583,7 +609,7 @@ async function _handleUpdateProvider(req, res, currentConfig, providerPoolManage
         if (existsSync(filePath)) {
             try {
                 const fileContent = readFileSync(filePath, 'utf-8');
-                providerPools = JSON.parse(fileContent);
+                providerPools = normalizeProviderPools(JSON.parse(fileContent));
             } catch (readError) {
                 res.writeHead(404, { 'Content-Type': 'application/json' });
                 res.end(JSON.stringify({ error: { message: 'Provider pools file not found' } }));
@@ -661,6 +687,7 @@ async function _handleUpdateProvider(req, res, currentConfig, providerPoolManage
  * 删除特定提供商配置
  */
 export async function handleDeleteProvider(req, res, currentConfig, providerPoolManager, providerType, providerUuid) {
+    providerType = normalizeProviderType(providerType);
     const filePath = currentConfig.PROVIDER_POOLS_FILE_PATH || 'configs/provider_pools.json';
     return withFileLock(filePath, () => _handleDeleteProvider(req, res, currentConfig, providerPoolManager, providerType, providerUuid)).catch(err => {
         res.writeHead(500, { 'Content-Type': 'application/json' });
@@ -670,6 +697,7 @@ export async function handleDeleteProvider(req, res, currentConfig, providerPool
 }
 async function _handleDeleteProvider(req, res, currentConfig, providerPoolManager, providerType, providerUuid) {
     try {
+        providerType = normalizeProviderType(providerType);
         const filePath = currentConfig.PROVIDER_POOLS_FILE_PATH || 'configs/provider_pools.json';
         let providerPools = {};
         
@@ -677,7 +705,7 @@ async function _handleDeleteProvider(req, res, currentConfig, providerPoolManage
         if (existsSync(filePath)) {
             try {
                 const fileContent = readFileSync(filePath, 'utf-8');
-                providerPools = JSON.parse(fileContent);
+                providerPools = normalizeProviderPools(JSON.parse(fileContent));
             } catch (readError) {
                 res.writeHead(404, { 'Content-Type': 'application/json' });
                 res.end(JSON.stringify({ error: { message: 'Provider pools file not found' } }));
@@ -742,6 +770,7 @@ async function _handleDeleteProvider(req, res, currentConfig, providerPoolManage
  * 禁用/启用特定提供商配置
  */
 export async function handleDisableEnableProvider(req, res, currentConfig, providerPoolManager, providerType, providerUuid, action) {
+    providerType = normalizeProviderType(providerType);
     const filePath = currentConfig.PROVIDER_POOLS_FILE_PATH || 'configs/provider_pools.json';
     return withFileLock(filePath, () => _handleDisableEnableProvider(req, res, currentConfig, providerPoolManager, providerType, providerUuid, action)).catch(err => {
         res.writeHead(500, { 'Content-Type': 'application/json' });
@@ -751,6 +780,7 @@ export async function handleDisableEnableProvider(req, res, currentConfig, provi
 }
 async function _handleDisableEnableProvider(req, res, currentConfig, providerPoolManager, providerType, providerUuid, action) {
     try {
+        providerType = normalizeProviderType(providerType);
         const filePath = currentConfig.PROVIDER_POOLS_FILE_PATH || 'configs/provider_pools.json';
         let providerPools = {};
         
@@ -758,7 +788,7 @@ async function _handleDisableEnableProvider(req, res, currentConfig, providerPoo
         if (existsSync(filePath)) {
             try {
                 const fileContent = readFileSync(filePath, 'utf-8');
-                providerPools = JSON.parse(fileContent);
+                providerPools = normalizeProviderPools(JSON.parse(fileContent));
             } catch (readError) {
                 res.writeHead(404, { 'Content-Type': 'application/json' });
                 res.end(JSON.stringify({ error: { message: 'Provider pools file not found' } }));
@@ -823,6 +853,7 @@ async function _handleDisableEnableProvider(req, res, currentConfig, providerPoo
  * 重置特定提供商类型的所有提供商健康状态
  */
 export async function handleResetProviderHealth(req, res, currentConfig, providerPoolManager, providerType) {
+    providerType = normalizeProviderType(providerType);
     const filePath = currentConfig.PROVIDER_POOLS_FILE_PATH || 'configs/provider_pools.json';
     return withFileLock(filePath, () => _handleResetProviderHealth(req, res, currentConfig, providerPoolManager, providerType)).catch(err => {
         res.writeHead(500, { 'Content-Type': 'application/json' });
@@ -832,6 +863,7 @@ export async function handleResetProviderHealth(req, res, currentConfig, provide
 }
 async function _handleResetProviderHealth(req, res, currentConfig, providerPoolManager, providerType) {
     try {
+        providerType = normalizeProviderType(providerType);
         const filePath = currentConfig.PROVIDER_POOLS_FILE_PATH || 'configs/provider_pools.json';
         
         let resetCount = 0;
@@ -842,7 +874,7 @@ async function _handleResetProviderHealth(req, res, currentConfig, providerPoolM
         if (existsSync(filePath)) {
             try {
                 const fileContent = readFileSync(filePath, 'utf-8');
-                providerPools = JSON.parse(fileContent);
+                providerPools = normalizeProviderPools(JSON.parse(fileContent));
             } catch (readError) {
                 logger.warn('[UI API] Failed to read provider pools during reset:', readError.message);
                 // 如果读取失败且管理器也不存在，才返回错误
@@ -937,6 +969,7 @@ async function _handleResetProviderHealth(req, res, currentConfig, providerPoolM
  * 删除特定提供商类型的所有不健康节点
  */
 export async function handleDeleteUnhealthyProviders(req, res, currentConfig, providerPoolManager, providerType) {
+    providerType = normalizeProviderType(providerType);
     const filePath = currentConfig.PROVIDER_POOLS_FILE_PATH || 'configs/provider_pools.json';
     return withFileLock(filePath, () => _handleDeleteUnhealthyProviders(req, res, currentConfig, providerPoolManager, providerType)).catch(err => {
         res.writeHead(500, { 'Content-Type': 'application/json' });
@@ -946,6 +979,7 @@ export async function handleDeleteUnhealthyProviders(req, res, currentConfig, pr
 }
 async function _handleDeleteUnhealthyProviders(req, res, currentConfig, providerPoolManager, providerType) {
     try {
+        providerType = normalizeProviderType(providerType);
         const filePath = currentConfig.PROVIDER_POOLS_FILE_PATH || 'configs/provider_pools.json';
         let providerPools = {};
         
@@ -953,7 +987,7 @@ async function _handleDeleteUnhealthyProviders(req, res, currentConfig, provider
         if (existsSync(filePath)) {
             try {
                 const fileContent = readFileSync(filePath, 'utf-8');
-                providerPools = JSON.parse(fileContent);
+                providerPools = normalizeProviderPools(JSON.parse(fileContent));
             } catch (readError) {
                 res.writeHead(404, { 'Content-Type': 'application/json' });
                 res.end(JSON.stringify({ error: { message: 'Provider pools file not found' } }));
@@ -1032,6 +1066,7 @@ async function _handleDeleteUnhealthyProviders(req, res, currentConfig, provider
  * 批量刷新特定提供商类型的所有不健康节点的 UUID
  */
 export async function handleRefreshUnhealthyUuids(req, res, currentConfig, providerPoolManager, providerType) {
+    providerType = normalizeProviderType(providerType);
     const filePath = currentConfig.PROVIDER_POOLS_FILE_PATH || 'configs/provider_pools.json';
     return withFileLock(filePath, () => _handleRefreshUnhealthyUuids(req, res, currentConfig, providerPoolManager, providerType)).catch(err => {
         res.writeHead(500, { 'Content-Type': 'application/json' });
@@ -1041,6 +1076,7 @@ export async function handleRefreshUnhealthyUuids(req, res, currentConfig, provi
 }
 async function _handleRefreshUnhealthyUuids(req, res, currentConfig, providerPoolManager, providerType) {
     try {
+        providerType = normalizeProviderType(providerType);
         const filePath = currentConfig.PROVIDER_POOLS_FILE_PATH || 'configs/provider_pools.json';
         let providerPools = {};
         
@@ -1048,7 +1084,7 @@ async function _handleRefreshUnhealthyUuids(req, res, currentConfig, providerPoo
         if (existsSync(filePath)) {
             try {
                 const fileContent = readFileSync(filePath, 'utf-8');
-                providerPools = JSON.parse(fileContent);
+                providerPools = normalizeProviderPools(JSON.parse(fileContent));
             } catch (readError) {
                 res.writeHead(404, { 'Content-Type': 'application/json' });
                 res.end(JSON.stringify({ error: { message: 'Provider pools file not found' } }));
@@ -1131,6 +1167,7 @@ async function _handleRefreshUnhealthyUuids(req, res, currentConfig, providerPoo
  * 对特定提供商类型的所有提供商执行健康检查
  */
 export async function handleHealthCheck(req, res, currentConfig, providerPoolManager, providerType) {
+    providerType = normalizeProviderType(providerType);
     // 健康检查涉及大量异步操作，但最后的文件保存必须加锁
     // 为了不长时间占用文件锁，我们只在保存文件时加锁
     try {
@@ -1244,7 +1281,7 @@ export async function handleHealthCheck(req, res, currentConfig, providerPoolMan
             if (existsSync(filePath)) {
                 try {
                     const fileContent = readFileSync(filePath, 'utf-8');
-                    currentPools = JSON.parse(fileContent);
+                    currentPools = normalizeProviderPools(JSON.parse(fileContent));
                 } catch (readError) {
                     logger.warn('[UI API] Failed to read existing provider pools for health check merge:', readError.message);
                 }
@@ -1296,6 +1333,7 @@ export async function handleHealthCheck(req, res, currentConfig, providerPoolMan
  * 支持单个文件路径或文件路径数组
  */
 export async function handleSingleProviderHealthCheck(req, res, currentConfig, providerPoolManager, providerType, providerUuid) {
+    providerType = normalizeProviderType(providerType);
     try {
         if (!providerPoolManager) {
             res.writeHead(400, { 'Content-Type': 'application/json' });
@@ -1374,7 +1412,7 @@ export async function handleQuickLinkProvider(req, res, currentConfig, providerP
         if (existsSync(poolsFilePath)) {
             try {
                 const fileContent = readFileSync(poolsFilePath, 'utf-8');
-                providerPools = JSON.parse(fileContent);
+                providerPools = normalizeProviderPools(JSON.parse(fileContent));
             } catch (readError) {
                 logger.warn('[UI API] Failed to read existing provider pools:', readError.message);
             }
@@ -1523,6 +1561,7 @@ export async function handleQuickLinkProvider(req, res, currentConfig, providerP
  * 刷新特定提供商的UUID
  */
 export async function handleRefreshProviderUuid(req, res, currentConfig, providerPoolManager, providerType, providerUuid) {
+    providerType = normalizeProviderType(providerType);
     const filePath = currentConfig.PROVIDER_POOLS_FILE_PATH || 'configs/provider_pools.json';
     return withFileLock(filePath, () => _handleRefreshProviderUuid(req, res, currentConfig, providerPoolManager, providerType, providerUuid)).catch(err => {
         res.writeHead(500, { 'Content-Type': 'application/json' });
@@ -1532,6 +1571,7 @@ export async function handleRefreshProviderUuid(req, res, currentConfig, provide
 }
 async function _handleRefreshProviderUuid(req, res, currentConfig, providerPoolManager, providerType, providerUuid) {
     try {
+        providerType = normalizeProviderType(providerType);
         const filePath = currentConfig.PROVIDER_POOLS_FILE_PATH || 'configs/provider_pools.json';
         let providerPools = {};
         
@@ -1539,7 +1579,7 @@ async function _handleRefreshProviderUuid(req, res, currentConfig, providerPoolM
         if (existsSync(filePath)) {
             try {
                 const fileContent = readFileSync(filePath, 'utf-8');
-                providerPools = JSON.parse(fileContent);
+                providerPools = normalizeProviderPools(JSON.parse(fileContent));
             } catch (readError) {
                 res.writeHead(404, { 'Content-Type': 'application/json' });
                 res.end(JSON.stringify({ error: { message: 'Provider pools file not found' } }));

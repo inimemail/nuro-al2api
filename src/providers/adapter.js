@@ -770,6 +770,10 @@ export function invalidateServiceAdapter(provider, uuid = null) {
  * @returns {boolean} - 是否有效
  */
 export function isRegisteredProvider(provider) {
+    if (provider === 'openai-deepseek') {
+        provider = MODEL_PROVIDER.DEEPSEEK_API;
+    }
+
     if (adapterRegistry.has(provider)) {
         return true;
     }
@@ -788,7 +792,10 @@ export function isRegisteredProvider(provider) {
 export function getServiceAdapter(config) {
     const customNameDisplay = config.customName ? ` (${config.customName})` : '';
     logger.info(`[Adapter] getServiceAdapter, provider: ${config.MODEL_PROVIDER}, uuid: ${config.uuid}${customNameDisplay}`);
-    const provider = config.MODEL_PROVIDER;
+    const provider = config.MODEL_PROVIDER === 'openai-deepseek'
+        ? MODEL_PROVIDER.DEEPSEEK_API
+        : config.MODEL_PROVIDER;
+    config.MODEL_PROVIDER = provider;
     const providerKey = getServiceInstanceKey(provider, config.uuid);
     
     if (!serviceInstances[providerKey]) {
