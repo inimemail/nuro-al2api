@@ -294,6 +294,7 @@ export class ClaudeApiService {
         // 通常，你需要根据 Anthropic 的文档硬编码你希望支持的模型。
         // 这里我们返回一些常见的 Claude 模型作为示例。
         const models = [
+            { id: "claude-opus-4-8", name: "claude-opus-4-8" },
             { id: "claude-opus-4-7", name: "claude-opus-4-7" },
             { id: "claude-opus-4-6", name: "claude-opus-4-6" },
             { id: "claude-sonnet-4-6", name: "claude-sonnet-4-6" },
