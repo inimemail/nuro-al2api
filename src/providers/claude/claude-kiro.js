@@ -34,6 +34,7 @@ const KIRO_CONSTANTS = {
     REFRESH_URL: 'https://prod.{{region}}.auth.desktop.kiro.dev/refreshToken',
     REFRESH_IDC_URL: 'https://oidc.{{region}}.amazonaws.com/token',
     BASE_URL: 'https://q.{{region}}.amazonaws.com/generateAssistantResponse',
+    REST_API_BASE: 'https://codewhisperer.us-east-1.amazonaws.com',
     DEFAULT_REGION: 'us-east-1',
     DEFAULT_MODEL_NAME: 'claude-sonnet-4-5',
     AXIOS_TIMEOUT: 300000, // 5 minutes timeout for long-running requests
@@ -62,6 +63,11 @@ const KIRO_CONTEXT_COMPRESSION = {
 const KIRO_MAX_TOOL_NAME_LENGTH = 64;
 let kiroThrottleQueue = Promise.resolve();
 let kiroLastRequestStartedAt = 0;
+
+function isValidKiroProfileArn(profileArn) {
+    return typeof profileArn === 'string' &&
+        /^arn:aws[a-z-]*:codewhisperer:[a-z0-9-]+:\d{12}:profile\/[A-Za-z0-9_-]+$/.test(profileArn.trim());
+}
 
 // Lazy-loaded PDF parser - only loaded when needed to avoid startup overhead
 let _pdfParseModule = null;
@@ -1285,6 +1291,7 @@ export class KiroApiService {
         this.modelName = KIRO_CONSTANTS.DEFAULT_MODEL_NAME;
         this.axiosInstance = null; // Initialize later in async method
         this.axiosSocialRefreshInstance = null;
+        this.tokenFilePath = null;
     }
  
     async initialize() {
@@ -1378,6 +1385,7 @@ export class KiroApiService {
 async loadCredentials() {
     // 获取凭证文件路径
     const tokenFilePath = this.credsFilePath || path.join(this.credPath, KIRO_AUTH_TOKEN_FILE);
+    this.tokenFilePath = tokenFilePath;
 
     // Helper to load credentials from a file
     const loadCredentialsFromFile = async (filePath) => {
@@ -1474,6 +1482,11 @@ async loadCredentials() {
         applyCredential('authRegion');
         applyCredential('apiRegion');
         applyCredential('idcRegion');
+
+        if (this.profileArn && !isValidKiroProfileArn(this.profileArn)) {
+            logger.warn('[Kiro Auth] Ignoring invalid profileArn from credentials.');
+            this.profileArn = undefined;
+        }
 
         const defaultRegion = firstNonEmptyString(this.config.KIRO_REGION, KIRO_CONSTANTS.DEFAULT_REGION);
         // Keep auth and API regions independent, matching kiro.rs:
@@ -1575,6 +1588,84 @@ async saveCredentialsToFile(filePath, newData) {
     logger.info(`[Kiro Auth] Updated token file: ${filePath}`);
 };
 
+async _cacheProfileArn(profileArn) {
+    if (!isValidKiroProfileArn(profileArn)) return '';
+
+    const trimmedProfileArn = profileArn.trim();
+    this.profileArn = trimmedProfileArn;
+
+    const tokenFilePath = this.tokenFilePath || this.credsFilePath || path.join(this.credPath, KIRO_AUTH_TOKEN_FILE);
+    try {
+        await this.saveCredentialsToFile(tokenFilePath, { profileArn: trimmedProfileArn });
+    } catch (error) {
+        logger.warn(`[Kiro Auth] Failed to cache profileArn: ${error.message}`);
+    }
+
+    return trimmedProfileArn;
+}
+
+async _listAvailableProfileArn() {
+    if (!this.accessToken) return '';
+
+    const axiosConfig = {
+        method: 'post',
+        url: `${this.config.KIRO_REST_API_BASE || KIRO_CONSTANTS.REST_API_BASE}/ListAvailableProfiles`,
+        data: { maxResults: 10 },
+        headers: {
+            'Authorization': `Bearer ${this.accessToken}`,
+            'Content-Type': KIRO_CONSTANTS.CONTENT_TYPE_JSON,
+            'Accept': KIRO_CONSTANTS.ACCEPT_JSON,
+            'amz-sdk-invocation-id': uuidv4(),
+            'amz-sdk-request': 'attempt=1; max=3',
+        },
+        timeout: KIRO_CONSTANTS.TOKEN_REFRESH_TIMEOUT,
+    };
+    this._applySidecar(axiosConfig);
+
+    const response = await this.axiosInstance.request(axiosConfig);
+    const profiles = Array.isArray(response.data?.profiles) ? response.data.profiles : [];
+    for (const profile of profiles) {
+        const profileArn = profile?.arn;
+        if (isValidKiroProfileArn(profileArn)) {
+            return profileArn.trim();
+        }
+    }
+
+    return '';
+}
+
+async ensureProfileArn() {
+    if (isValidKiroProfileArn(this.profileArn)) {
+        return this.profileArn.trim();
+    }
+
+    try {
+        const profileArn = await this._listAvailableProfileArn();
+        if (profileArn) {
+            logger.info('[Kiro Auth] Resolved profileArn via ListAvailableProfiles.');
+            return await this._cacheProfileArn(profileArn);
+        }
+    } catch (error) {
+        logger.warn(`[Kiro Auth] ListAvailableProfiles failed: ${error.message}`);
+    }
+
+    if (this.refreshToken) {
+        try {
+            const tokenFilePath = this.tokenFilePath || this.credsFilePath || path.join(this.credPath, KIRO_AUTH_TOKEN_FILE);
+            await this._doTokenRefresh(this.saveCredentialsToFile.bind(this), tokenFilePath);
+            if (isValidKiroProfileArn(this.profileArn)) {
+                logger.info('[Kiro Auth] Resolved profileArn via token refresh.');
+                return this.profileArn.trim();
+            }
+        } catch (error) {
+            logger.warn(`[Kiro Auth] Token refresh did not resolve profileArn: ${error.message}`);
+        }
+    }
+
+    logger.warn('[Kiro Auth] No available Kiro profileArn resolved for this account.');
+    return '';
+}
+
     /**
      * 执行实际的 token 刷新操作（内部方法）
      * @param {Function} saveCredentialsToFile - 保存凭证的函数
@@ -1636,7 +1727,9 @@ async saveCredentialsToFile(filePath, newData) {
             if (response.data && response.data.accessToken) {
                 this.accessToken = response.data.accessToken;
                 this.refreshToken = response.data.refreshToken || this.refreshToken;
-                this.profileArn = response.data.profileArn || this.profileArn;
+                if (isValidKiroProfileArn(response.data.profileArn)) {
+                    this.profileArn = response.data.profileArn;
+                }
                 const expiresIn = Number(response.data.expiresIn) || 3600;
                 const expiresAt = new Date(Date.now() + expiresIn * 1000).toISOString();
                 this.expiresAt = expiresAt;
@@ -1647,7 +1740,7 @@ async saveCredentialsToFile(filePath, newData) {
                     refreshToken: this.refreshToken,
                     expiresAt: expiresAt,
                 };
-                if (this.profileArn) {
+                if (isValidKiroProfileArn(this.profileArn)) {
                     updatedTokenData.profileArn = this.profileArn;
                 }
                 await saveCredentialsToFile(tokenFilePath, updatedTokenData);
@@ -2618,7 +2711,7 @@ async saveCredentialsToFile(filePath, newData) {
 
         request.conversationState.currentMessage.userInputMessage = userInputMessage;
 
-        if (this.authMethod === KIRO_CONSTANTS.AUTH_METHOD_SOCIAL) {
+        if (isValidKiroProfileArn(this.profileArn)) {
             request.profileArn = this.profileArn;
         }
 
@@ -2786,6 +2879,10 @@ async saveCredentialsToFile(filePath, newData) {
         }
 
         const requestData = await this.buildCodewhispererRequest(messages, model, body.tools, body.system, body.thinking, body.tool_choice, body.response_format, requestContext);
+        const profileArn = await this.ensureProfileArn();
+        if (profileArn) {
+            requestData.profileArn = profileArn;
+        }
 
         try {
             const token = this.accessToken; // Use the already initialized token
@@ -3740,6 +3837,10 @@ async saveCredentialsToFile(filePath, newData) {
         }
 
         const requestData = await this.buildCodewhispererRequest(messages, model, body.tools, body.system, body.thinking, body.tool_choice, body.response_format, requestContext);
+        const profileArn = await this.ensureProfileArn();
+        if (profileArn) {
+            requestData.profileArn = profileArn;
+        }
         const toolNameMaps = requestData._kiroToolNameMaps;
 
         const token = this.accessToken;
@@ -4990,7 +5091,7 @@ async saveCredentialsToFile(filePath, newData) {
             origin: KIRO_CONSTANTS.ORIGIN_AI_EDITOR,
             resourceType: resourceType
         });
-         if (this.authMethod === KIRO_CONSTANTS.AUTH_METHOD_SOCIAL && this.profileArn) {
+         if (isValidKiroProfileArn(this.profileArn)) {
             params.append('profileArn', this.profileArn);
         }
         const fullUrl = `${usageLimitsUrl}?${params.toString()}`;

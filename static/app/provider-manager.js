@@ -1739,11 +1739,19 @@ function showKiroIamSsoModal(providerType, extraOptions = {}) {
                             style="padding: 10px 12px; border: 1px solid #d1d5db; border-radius: 6px; font-size: 14px;"
                         />
                     </label>
+                    <label style="display: flex; flex-direction: column; gap: 6px; font-weight: 600; color: #374151;">
+                        <span data-i18n="oauth.kiro.profileArn">${t('oauth.kiro.profileArn')}</span>
+                        <input type="text" class="iam-sso-profile-arn-input"
+                            placeholder="arn:aws:codewhisperer:us-east-1:123456789012:profile/XXXXXXXX"
+                            style="padding: 10px 12px; border: 1px solid #d1d5db; border-radius: 6px; font-size: 14px;"
+                        />
+                    </label>
+                    <p style="margin: -8px 0 0 0; font-size: 12px; color: #6b7280;" data-i18n="oauth.kiro.profileArnHint">${t('oauth.kiro.profileArnHint')}</p>
                 </div>
             </div>
-            <div class="modal-footer">
+            <div class="modal-footer" style="display: flex; justify-content: flex-end; gap: 10px; flex-wrap: wrap;">
                 <button class="modal-cancel" data-i18n="modal.provider.cancel">${t('modal.provider.cancel')}</button>
-                <button class="iam-sso-submit-btn" style="background: #00a67e; color: white;">
+                <button class="iam-sso-submit-btn" style="background: #00a67e; color: white; max-width: 100%; white-space: normal; line-height: 1.3;">
                     <i class="fas fa-external-link-alt"></i>
                     <span data-i18n="oauth.kiro.startIdentityCenterAuth">${t('oauth.kiro.startIdentityCenterAuth')}</span>
                 </button>
@@ -1760,9 +1768,14 @@ function showKiroIamSsoModal(providerType, extraOptions = {}) {
     modal.querySelector('.iam-sso-submit-btn').onclick = async () => {
         const startUrl = modal.querySelector('.iam-sso-start-url-input').value.trim();
         const region = modal.querySelector('.iam-sso-region-input').value.trim() || 'us-east-1';
+        const profileArn = modal.querySelector('.iam-sso-profile-arn-input').value.trim();
 
         if (!startUrl) {
             showToast(t('common.warning'), t('oauth.kiro.identityCenterStartURLRequired'), 'warning');
+            return;
+        }
+        if (profileArn && !/^arn:aws[a-z-]*:codewhisperer:[a-z0-9-]+:\d{12}:profile\/[A-Za-z0-9_-]+$/.test(profileArn)) {
+            showToast(t('common.warning'), t('oauth.kiro.profileArnInvalid'), 'warning');
             return;
         }
 
@@ -1773,7 +1786,8 @@ function showKiroIamSsoModal(providerType, extraOptions = {}) {
             authMethod: 'iam-sso',
             builderIDStartURL: startUrl,
             startUrl,
-            region
+            region,
+            profileArn
         });
     };
 }
@@ -3416,6 +3430,7 @@ function showAuthModal(authUrl, authInfo) {
     const safeDeviceStartUrlValue = escapeHtml(deviceStartUrlValue);
     const safeDeviceStartUrlPlaceholder = escapeHtml(deviceStartUrlPlaceholder);
     const safeDeviceRegion = escapeHtml(authInfo.region || 'us-east-1');
+    const safeProfileArn = escapeHtml(authInfo.profileArn || '');
     
     modal.innerHTML = `
         <div class="modal-content" style="max-width: 600px;">
@@ -3478,6 +3493,19 @@ function showAuthModal(authUrl, authInfo) {
                                 />
                             </div>
                         </div>
+                        ${isKiroIdentityCenterAuth ? `
+                        <div class="builder-id-profile-section" style="margin-top: 12px; padding-top: 12px; border-top: 1px dashed #fcd34d;">
+                            <label style="display: flex; align-items: center; gap: 6px; margin-bottom: 6px; font-size: 13px; font-weight: 600; color: #92400e;">
+                                <i class="fas fa-id-badge"></i>
+                                <span>${t('oauth.kiro.profileArn')}</span>
+                            </label>
+                            <input type="text" class="builder-id-profile-arn-input"
+                                value="${safeProfileArn}"
+                                placeholder="arn:aws:codewhisperer:us-east-1:123456789012:profile/XXXXXXXX"
+                                style="width: 100%; box-sizing: border-box; padding: 6px 10px; border: 1px solid #fcd34d; border-radius: 4px; font-size: 13px; color: #92400e; background: white;"
+                            />
+                        </div>
+                        ` : ''}
                         ` : ''}
                     </div>
                     ${instructionsHtml}
@@ -3538,9 +3566,15 @@ function showAuthModal(authUrl, authInfo) {
         regenerateBuilderIdBtn.onclick = async () => {
             const builderIdStartUrl = modal.querySelector('.builder-id-start-url-input').value.trim();
             const region = modal.querySelector('.builder-id-region-input').value.trim();
+            const profileArnInput = modal.querySelector('.builder-id-profile-arn-input');
+            const profileArn = profileArnInput ? profileArnInput.value.trim() : authInfo.profileArn;
 
             if (isKiroIdentityCenterAuth && !builderIdStartUrl) {
                 showToast(t('common.warning'), t('oauth.kiro.identityCenterStartURLRequired'), 'warning');
+                return;
+            }
+            if (profileArn && !/^arn:aws[a-z-]*:codewhisperer:[a-z0-9-]+:\d{12}:profile\/[A-Za-z0-9_-]+$/.test(profileArn)) {
+                showToast(t('common.warning'), t('oauth.kiro.profileArnInvalid'), 'warning');
                 return;
             }
 
@@ -3552,7 +3586,8 @@ function showAuthModal(authUrl, authInfo) {
                 authMethod: authInfo.authMethod,
                 builderIDStartURL: builderIdStartUrl || 'https://view.awsapps.com/start',
                 startUrl: builderIdStartUrl || 'https://view.awsapps.com/start',
-                region: region || 'us-east-1'
+                region: region || 'us-east-1',
+                profileArn
             };
             // 移除不需要传递回后端的字段
             delete options.provider;

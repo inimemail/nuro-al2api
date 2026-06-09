@@ -47,6 +47,11 @@ const KIRO_OAUTH_CONFIG = {
     logPrefix: '[Kiro Auth]'
 };
 
+function isValidKiroProfileArn(profileArn) {
+    return typeof profileArn === 'string' &&
+        /^arn:aws[a-z-]*:codewhisperer:[a-z0-9-]+:\d{12}:profile\/[A-Za-z0-9_-]+$/.test(profileArn.trim());
+}
+
 /**
  * 活动的 Kiro 回调服务器管理
  */
@@ -449,6 +454,14 @@ async function pollKiroBuilderIDToken(clientId, clientSecret, deviceCode, interv
                     idcRegion: options.region || 'us-east-1',
                     startUrl: options.startUrl || options.builderIDStartURL
                 };
+                if (typeof data.profileArn === 'string' && data.profileArn.trim()) {
+                    tokenData.profileArn = data.profileArn.trim();
+                }
+                if (isValidKiroProfileArn(options.profileArn)) {
+                    tokenData.profileArn = options.profileArn.trim();
+                } else if (isValidKiroProfileArn(data.profileArn)) {
+                    tokenData.profileArn = data.profileArn.trim();
+                }
                 
                 await fs.promises.mkdir(path.dirname(credPath), { recursive: true });
                 await fs.promises.writeFile(credPath, JSON.stringify(tokenData, null, 2));
@@ -1121,6 +1134,9 @@ export async function importAwsCredentials(credentials, skipDuplicateCheck = fal
         if (credentials.startUrl) {
             credentialsData.startUrl = credentials.startUrl;
         }
+        if (isValidKiroProfileArn(credentials.profileArn)) {
+            credentialsData.profileArn = credentials.profileArn.trim();
+        }
         if (credentials.region) {
             credentialsData.region = credentials.region;
         }
@@ -1158,6 +1174,9 @@ export async function importAwsCredentials(credentials, skipDuplicateCheck = fal
                 const tokenData = await refreshResponse.json();
                 credentialsData.accessToken = tokenData.accessToken;
                 credentialsData.refreshToken = tokenData.refreshToken;
+                if (isValidKiroProfileArn(tokenData.profileArn)) {
+                    credentialsData.profileArn = tokenData.profileArn.trim();
+                }
                 const expiresIn = tokenData.expiresIn || 3600;
                 credentialsData.expiresAt = new Date(Date.now() + expiresIn * 1000).toISOString();
                 logger.info(`${KIRO_OAUTH_CONFIG.logPrefix} Token refreshed successfully`);
