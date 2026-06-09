@@ -66,7 +66,7 @@ let kiroLastRequestStartedAt = 0;
 
 function isValidKiroProfileArn(profileArn) {
     return typeof profileArn === 'string' &&
-        /^arn:aws[a-z-]*:codewhisperer:[a-z0-9-]+:\d{12}:profile\/[A-Za-z0-9_-]+$/.test(profileArn.trim());
+        /^arn:aws[a-z-]*:codewhisperer:(?:[a-z0-9-]+:\d{12}:)?profile\/\S+$/.test(profileArn.trim());
 }
 
 // Lazy-loaded PDF parser - only loaded when needed to avoid startup overhead

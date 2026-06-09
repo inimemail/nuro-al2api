@@ -1749,9 +1749,9 @@ function showKiroIamSsoModal(providerType, extraOptions = {}) {
                     <p style="margin: -8px 0 0 0; font-size: 12px; color: #6b7280;" data-i18n="oauth.kiro.profileArnHint">${t('oauth.kiro.profileArnHint')}</p>
                 </div>
             </div>
-            <div class="modal-footer" style="display: flex; justify-content: flex-end; gap: 10px; flex-wrap: wrap;">
+            <div class="modal-footer">
                 <button class="modal-cancel" data-i18n="modal.provider.cancel">${t('modal.provider.cancel')}</button>
-                <button class="iam-sso-submit-btn" style="background: #00a67e; color: white; max-width: 100%; white-space: normal; line-height: 1.3;">
+                <button class="btn btn-primary iam-sso-submit-btn">
                     <i class="fas fa-external-link-alt"></i>
                     <span data-i18n="oauth.kiro.startIdentityCenterAuth">${t('oauth.kiro.startIdentityCenterAuth')}</span>
                 </button>
@@ -1774,7 +1774,7 @@ function showKiroIamSsoModal(providerType, extraOptions = {}) {
             showToast(t('common.warning'), t('oauth.kiro.identityCenterStartURLRequired'), 'warning');
             return;
         }
-        if (profileArn && !/^arn:aws[a-z-]*:codewhisperer:[a-z0-9-]+:\d{12}:profile\/[A-Za-z0-9_-]+$/.test(profileArn)) {
+        if (profileArn && !/^arn:aws[a-z-]*:codewhisperer:(?:[a-z0-9-]+:\d{12}:)?profile\/\S+$/.test(profileArn)) {
             showToast(t('common.warning'), t('oauth.kiro.profileArnInvalid'), 'warning');
             return;
         }
@@ -3573,7 +3573,7 @@ function showAuthModal(authUrl, authInfo) {
                 showToast(t('common.warning'), t('oauth.kiro.identityCenterStartURLRequired'), 'warning');
                 return;
             }
-            if (profileArn && !/^arn:aws[a-z-]*:codewhisperer:[a-z0-9-]+:\d{12}:profile\/[A-Za-z0-9_-]+$/.test(profileArn)) {
+            if (profileArn && !/^arn:aws[a-z-]*:codewhisperer:(?:[a-z0-9-]+:\d{12}:)?profile\/\S+$/.test(profileArn)) {
                 showToast(t('common.warning'), t('oauth.kiro.profileArnInvalid'), 'warning');
                 return;
             }
