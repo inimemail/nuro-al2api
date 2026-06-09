@@ -1,7 +1,7 @@
 // 提供商管理功能模块
 
 import { providerStats, updateProviderStats } from './constants.js';
-import { showToast, formatUptime, getProviderConfigs, getBaseProviderConfigs, bindOnce } from './utils.js';
+import { showToast, formatUptime, getProviderConfigs, getBaseProviderConfigs, bindOnce, escapeHtml } from './utils.js';
 import { fileUploadHandler } from './file-upload.js';
 import { t, getCurrentLanguage } from './i18n.js';
 import { renderRoutingExamples } from './routing-examples.js';
@@ -1637,6 +1637,13 @@ function showKiroAuthMethodSelector(providerType) {
                             <div style="font-size: 12px; color: #666;" data-i18n="oauth.kiro.awsBuilderDesc">${t('oauth.kiro.awsBuilderDesc')}</div>
                         </div>
                     </button>
+                    <button class="auth-method-btn" data-method="iam-sso" style="display: flex; align-items: center; gap: 12px; padding: 16px; border: 2px solid #e0e0e0; border-radius: 8px; background: white; cursor: pointer; transition: all 0.2s;">
+                        <i class="fas fa-key" style="font-size: 24px; color: #374151;"></i>
+                        <div style="text-align: left;">
+                            <div style="font-weight: 600; color: #333;" data-i18n="oauth.kiro.iamSso">${t('oauth.kiro.iamSso')}</div>
+                            <div style="font-size: 12px; color: #666;" data-i18n="oauth.kiro.iamSsoDesc">${t('oauth.kiro.iamSsoDesc')}</div>
+                        </div>
+                    </button>
                     <button class="auth-method-btn" data-method="aws-import" style="display: flex; align-items: center; gap: 12px; padding: 16px; border: 2px solid #e0e0e0; border-radius: 8px; background: white; cursor: pointer; transition: all 0.2s;">
                         <i class="fas fa-cloud-upload-alt" style="font-size: 24px; color: #ff9900;"></i>
                         <div style="text-align: left;">
@@ -1689,11 +1696,86 @@ function showKiroAuthMethodSelector(providerType) {
                 showKiroBatchImportModal();
             } else if (method === 'aws-import') {
                 showKiroAwsImportModal();
+            } else if (method === 'iam-sso') {
+                showKiroIamSsoModal(providerType);
             } else {
                 await executeGenerateAuthUrl(providerType, { method });
             }
         });
     });
+}
+
+/**
+ * 显示 Kiro IAM Identity Center 企业 SSO 授权参数对话框
+ * @param {string} providerType - 提供商类型
+ * @param {Object} extraOptions - 额外选项
+ */
+function showKiroIamSsoModal(providerType, extraOptions = {}) {
+    const modal = document.createElement('div');
+    modal.className = 'modal-overlay';
+    modal.style.display = 'flex';
+
+    modal.innerHTML = `
+        <div class="modal-content" style="max-width: 550px;">
+            <div class="modal-header">
+                <h3><i class="fas fa-key"></i> <span data-i18n="oauth.kiro.iamSso">${t('oauth.kiro.iamSso')}</span></h3>
+                <button class="modal-close">&times;</button>
+            </div>
+            <div class="modal-body">
+                <div style="display: flex; flex-direction: column; gap: 14px;">
+                    <label style="display: flex; flex-direction: column; gap: 6px; font-weight: 600; color: #374151;">
+                        <span data-i18n="oauth.kiro.identityCenterStartURL">${t('oauth.kiro.identityCenterStartURL')}</span>
+                        <input type="text" class="iam-sso-start-url-input"
+                            placeholder="https://your-company.awsapps.com/start"
+                            style="padding: 10px 12px; border: 1px solid #d1d5db; border-radius: 6px; font-size: 14px;"
+                        />
+                    </label>
+                    <p style="margin: -8px 0 0 0; font-size: 12px; color: #6b7280;" data-i18n="oauth.kiro.identityCenterStartURLHint">${t('oauth.kiro.identityCenterStartURLHint')}</p>
+                    <label style="display: flex; flex-direction: column; gap: 6px; font-weight: 600; color: #374151;">
+                        <span data-i18n="oauth.kiro.identityCenterRegion">${t('oauth.kiro.identityCenterRegion')}</span>
+                        <input type="text" class="iam-sso-region-input"
+                            value="us-east-1"
+                            placeholder="us-east-1"
+                            style="padding: 10px 12px; border: 1px solid #d1d5db; border-radius: 6px; font-size: 14px;"
+                        />
+                    </label>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button class="modal-cancel" data-i18n="modal.provider.cancel">${t('modal.provider.cancel')}</button>
+                <button class="iam-sso-submit-btn" style="background: #00a67e; color: white;">
+                    <i class="fas fa-external-link-alt"></i>
+                    <span data-i18n="oauth.kiro.startIdentityCenterAuth">${t('oauth.kiro.startIdentityCenterAuth')}</span>
+                </button>
+            </div>
+        </div>
+    `;
+
+    document.body.appendChild(modal);
+
+    const closeModal = () => modal.remove();
+    modal.querySelector('.modal-close').onclick = closeModal;
+    modal.querySelector('.modal-cancel').onclick = closeModal;
+
+    modal.querySelector('.iam-sso-submit-btn').onclick = async () => {
+        const startUrl = modal.querySelector('.iam-sso-start-url-input').value.trim();
+        const region = modal.querySelector('.iam-sso-region-input').value.trim() || 'us-east-1';
+
+        if (!startUrl) {
+            showToast(t('common.warning'), t('oauth.kiro.identityCenterStartURLRequired'), 'warning');
+            return;
+        }
+
+        closeModal();
+        await executeGenerateAuthUrl(providerType, {
+            ...extraOptions,
+            method: 'iam-sso',
+            authMethod: 'iam-sso',
+            builderIDStartURL: startUrl,
+            startUrl,
+            region
+        });
+    };
 }
 
 /**
@@ -2987,7 +3069,7 @@ function showKiroAwsImportModal() {
                 // 确保每个凭据都有 authMethod
                 const credentialsToImport = mergedCredentials.map(cred => ({
                     ...cred,
-                    authMethod: cred.authMethod || 'builder-id'
+                    authMethod: cred.authMethod || (cred.startUrl && cred.startUrl !== 'https://view.awsapps.com/start' ? 'iam-sso' : 'builder-id')
                 }));
                 
                 // 创建进度显示区域
@@ -3129,9 +3211,9 @@ function showKiroAwsImportModal() {
                 
             } else {
                 // 单个导入模式
-                // 确保 authMethod 为 builder-id（AWS 账号模式）
+                // 确保 AWS 账号模式有 authMethod；企业 SSO 凭据按 startUrl 自动标记
                 if (!mergedCredentials.authMethod) {
-                    mergedCredentials.authMethod = 'builder-id';
+                    mergedCredentials.authMethod = mergedCredentials.startUrl && mergedCredentials.startUrl !== 'https://view.awsapps.com/start' ? 'iam-sso' : 'builder-id';
                 }
                 
                 const response = await window.apiClient.post('/kiro/import-aws-credentials', {
@@ -3269,7 +3351,9 @@ function showAuthModal(authUrl, authInfo) {
     
     // 获取需要开放的端口号（从 authInfo 或当前页面 URL）
     const requiredPort = authInfo.callbackPort || authInfo.port || window.location.port || '3000';
-    const isDeviceFlow = authInfo.provider === 'openai-qwen-oauth' || (authInfo.provider === 'claude-kiro-oauth' && authInfo.authMethod === 'builder-id');
+    const isKiroDeviceFlow = authInfo.provider === 'claude-kiro-oauth' && ['builder-id', 'iam-sso'].includes(authInfo.authMethod);
+    const isKiroIdentityCenterAuth = authInfo.provider === 'claude-kiro-oauth' && authInfo.authMethod === 'iam-sso';
+    const isDeviceFlow = authInfo.provider === 'openai-qwen-oauth' || isKiroDeviceFlow;
 
     let instructionsHtml = '';
     if (authInfo.provider === 'openai-qwen-oauth') {
@@ -3285,8 +3369,8 @@ function showAuthModal(authUrl, authInfo) {
             </div>
         `;
     } else if (authInfo.provider === 'claude-kiro-oauth') {
-        const methodDisplay = authInfo.authMethod === 'builder-id' ? 'AWS Builder ID' : `Social (${authInfo.socialProvider || 'Google'})`;
-        const methodAccount = authInfo.authMethod === 'builder-id' ? 'AWS Builder ID' : authInfo.socialProvider || 'Google';
+        const methodDisplay = authInfo.authMethod === 'iam-sso' ? t('oauth.kiro.iamSso') : (authInfo.authMethod === 'builder-id' ? 'AWS Builder ID' : `Social (${authInfo.socialProvider || 'Google'})`);
+        const methodAccount = authInfo.authMethod === 'iam-sso' ? 'IAM Identity Center' : (authInfo.authMethod === 'builder-id' ? 'AWS Builder ID' : authInfo.socialProvider || 'Google');
         instructionsHtml = `
             <div class="auth-instructions">
                 <h4 data-i18n="oauth.modal.steps">${t('oauth.modal.steps')}</h4>
@@ -3324,6 +3408,14 @@ function showAuthModal(authUrl, authInfo) {
             </div>
         `;
     }
+
+    const safeProvider = escapeHtml(authInfo.provider || '');
+    const safeAuthUrl = escapeHtml(authUrl || '');
+    const deviceStartUrlValue = authInfo.builderIDStartURL || authInfo.startUrl || (isKiroIdentityCenterAuth ? '' : 'https://view.awsapps.com/start');
+    const deviceStartUrlPlaceholder = isKiroIdentityCenterAuth ? 'https://your-company.awsapps.com/start' : 'https://view.awsapps.com/start';
+    const safeDeviceStartUrlValue = escapeHtml(deviceStartUrlValue);
+    const safeDeviceStartUrlPlaceholder = escapeHtml(deviceStartUrlPlaceholder);
+    const safeDeviceRegion = escapeHtml(authInfo.region || 'us-east-1');
     
     modal.innerHTML = `
         <div class="modal-content" style="max-width: 600px;">
@@ -3333,9 +3425,9 @@ function showAuthModal(authUrl, authInfo) {
             </div>
             <div class="modal-body">
                 <div class="auth-info">
-                    <p><strong data-i18n="oauth.modal.provider">${t('oauth.modal.provider')}</strong> ${authInfo.provider}</p>
+                    <p><strong data-i18n="oauth.modal.provider">${t('oauth.modal.provider')}</strong> ${safeProvider}</p>
                     <div class="port-info-section" style="margin: 12px 0; padding: 12px; background: #fef3c7; border: 1px solid #fcd34d; border-radius: 8px; position: relative;">
-                        ${(authInfo.provider === 'claude-kiro-oauth' && authInfo.authMethod === 'builder-id') ? `
+                        ${isKiroDeviceFlow ? `
                         <button class="regenerate-builder-id-btn" title="${t('common.generate')}" style="position: absolute; top: 12px; right: 12px; background: none; border: 1px solid #d97706; border-radius: 4px; cursor: pointer; color: #d97706; padding: 4px 8px;">
                             <i class="fas fa-sync-alt"></i>
                         </button>
@@ -3354,23 +3446,23 @@ function showAuthModal(authUrl, authInfo) {
                             }
                         </div>
                         <p style="margin: 8px 0 0 0; font-size: 0.85rem; color: #92400e;" data-i18n="oauth.modal.portNote">${t('oauth.modal.portNote')}</p>
-                        ${(authInfo.provider === 'claude-kiro-oauth' && authInfo.authMethod === 'builder-id') ? `
+                        ${isKiroDeviceFlow ? `
                         <div class="builder-id-url-section" style="margin-top: 12px; padding-top: 12px; border-top: 1px dashed #fcd34d;">
                             <label style="display: flex; align-items: center; gap: 6px; margin-bottom: 6px; font-size: 13px; font-weight: 600; color: #92400e;">
                                 <i class="fas fa-link"></i>
-                                <span data-i18n="oauth.kiro.builderIDStartURL">${t('oauth.kiro.builderIDStartURL') || 'Builder ID Start URL'}</span>
-                                <span style="font-weight: normal; color: #b45309;">(${t('common.optional') || '可选'})</span>
+                                <span>${isKiroIdentityCenterAuth ? t('oauth.kiro.identityCenterStartURL') : (t('oauth.kiro.builderIDStartURL') || 'Builder ID Start URL')}</span>
+                                ${isKiroIdentityCenterAuth ? '' : `<span style="font-weight: normal; color: #b45309;">(${t('common.optional') || '可选'})</span>`}
                             </label>
                             <div style="display: flex; align-items: center; gap: 4px;">
                                 <input type="text" class="builder-id-start-url-input"
-                                    value="${authInfo.builderIDStartURL || 'https://view.awsapps.com/start'}"
-                                    placeholder="https://view.awsapps.com/start"
+                                    value="${safeDeviceStartUrlValue}"
+                                    placeholder="${safeDeviceStartUrlPlaceholder}"
                                     style="flex: 1; padding: 6px 10px; border: 1px solid #fcd34d; border-radius: 4px; font-size: 13px; color: #92400e; background: white;"
                                 />
                             </div>
                             <p style="margin: 6px 0 0 0; font-size: 0.75rem; color: #b45309;">
                                 <i class="fas fa-info-circle"></i>
-                                <span data-i18n="oauth.kiro.builderIDStartURLHint">${t('oauth.kiro.builderIDStartURLHint') || '如果您使用 AWS IAM Identity Center，请输入您的 Start URL'}</span>
+                                <span>${isKiroIdentityCenterAuth ? t('oauth.kiro.identityCenterStartURLHint') : (t('oauth.kiro.builderIDStartURLHint') || '如果您使用 AWS IAM Identity Center，请输入您的 Start URL')}</span>
                             </p>
                         </div>
                         <div class="builder-id-region-section" style="margin-top: 12px; padding-top: 12px; border-top: 1px dashed #fcd34d;">
@@ -3380,7 +3472,7 @@ function showAuthModal(authUrl, authInfo) {
                             </label>
                             <div style="display: flex; align-items: center; gap: 4px;">
                                 <input type="text" class="builder-id-region-input"
-                                    value="${authInfo.region || 'us-east-1'}"
+                                    value="${safeDeviceRegion}"
                                     placeholder="us-east-1"
                                     style="flex: 1; padding: 6px 10px; border: 1px solid #fcd34d; border-radius: 4px; font-size: 13px; color: #92400e; background: white;"
                                 />
@@ -3392,7 +3484,7 @@ function showAuthModal(authUrl, authInfo) {
                     <div class="auth-url-section">
                         <label data-i18n="oauth.modal.urlLabel">${t('oauth.modal.urlLabel')}</label>
                         <div class="auth-url-container">
-                            <input type="text" readonly value="${authUrl}" class="auth-url-input">
+                            <input type="text" readonly value="${safeAuthUrl}" class="auth-url-input">
                             <button class="copy-btn" data-i18n="oauth.modal.copyTitle" title="复制链接">
                                 <i class="fas fa-copy"></i>
                             </button>
@@ -3446,11 +3538,20 @@ function showAuthModal(authUrl, authInfo) {
         regenerateBuilderIdBtn.onclick = async () => {
             const builderIdStartUrl = modal.querySelector('.builder-id-start-url-input').value.trim();
             const region = modal.querySelector('.builder-id-region-input').value.trim();
+
+            if (isKiroIdentityCenterAuth && !builderIdStartUrl) {
+                showToast(t('common.warning'), t('oauth.kiro.identityCenterStartURLRequired'), 'warning');
+                return;
+            }
+
             modal.remove();
             // 构造重新请求的参数
             const options = {
                 ...authInfo,
+                method: authInfo.authMethod,
+                authMethod: authInfo.authMethod,
                 builderIDStartURL: builderIdStartUrl || 'https://view.awsapps.com/start',
+                startUrl: builderIdStartUrl || 'https://view.awsapps.com/start',
                 region: region || 'us-east-1'
             };
             // 移除不需要传递回后端的字段
@@ -4073,6 +4174,7 @@ export {
     openProviderManager,
     showAuthModal,
     executeGenerateAuthUrl,
+    showKiroIamSsoModal,
     handleGenerateAuthUrl,
     checkUpdate,
     performUpdate,

@@ -387,6 +387,13 @@ async function handleGenerateCreds(event) {
                                     <div style="font-size: 12px; color: #666;" data-i18n="oauth.kiro.awsBuilderDesc">${t('oauth.kiro.awsBuilderDesc')}</div>
                                 </div>
                             </button>
+                            <button class="auth-method-btn" data-method="iam-sso" style="display: flex; align-items: center; gap: 12px; padding: 16px; border: 2px solid #e0e0e0; border-radius: 8px; background: white; cursor: pointer; transition: all 0.2s;">
+                                <i class="fas fa-key" style="font-size: 24px; color: #374151;"></i>
+                                <div style="text-align: left;">
+                                    <div style="font-weight: 600; color: #333;" data-i18n="oauth.kiro.iamSso">${t('oauth.kiro.iamSso')}</div>
+                                    <div style="font-size: 12px; color: #666;" data-i18n="oauth.kiro.iamSsoDesc">${t('oauth.kiro.iamSsoDesc')}</div>
+                                </div>
+                            </button>
                         </div>
                     </div>
                     <div class="modal-footer">
@@ -405,6 +412,10 @@ async function handleGenerateCreds(event) {
                 btn.onclick = async () => {
                     const method = btn.dataset.method;
                     closeModal();
+                    if (method === 'iam-sso' && window.showKiroIamSsoModal) {
+                        window.showKiroIamSsoModal(providerType, { targetInputId });
+                        return;
+                    }
                     await proceedWithAuth(providerType, targetInputId, { method });
                 };
             });

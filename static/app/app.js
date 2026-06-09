@@ -43,6 +43,7 @@ import {
     openProviderManager,
     showAuthModal,
     executeGenerateAuthUrl,
+    showKiroIamSsoModal,
     handleGenerateAuthUrl,
     showAddProviderGroupModal
 } from './provider-manager.js';
@@ -267,6 +268,7 @@ window.refreshProviderConfig = refreshProviderConfig;
 window.fileUploadHandler = fileUploadHandler;
 window.showAuthModal = showAuthModal;
 window.executeGenerateAuthUrl = executeGenerateAuthUrl;
+window.showKiroIamSsoModal = showKiroIamSsoModal;
 window.handleGenerateAuthUrl = handleGenerateAuthUrl;
 window.showAddProviderGroupModal = showAddProviderGroupModal;
 

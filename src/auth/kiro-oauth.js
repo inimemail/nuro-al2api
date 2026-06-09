@@ -210,7 +210,7 @@ function generateCodeChallenge(codeVerifier) {
  * 处理 Kiro OAuth 授权（统一入口）
  * @param {Object} currentConfig - 当前配置对象
  * @param {Object} options - 额外选项
- *   - method: 'google' | 'github' | 'builder-id'
+ *   - method: 'google' | 'github' | 'builder-id' | 'iam-sso'
  *   - saveToConfigs: boolean
  * @returns {Promise<Object>} 返回授权URL和相关信息
  */
@@ -225,6 +225,8 @@ export async function handleKiroOAuth(currentConfig, options = {}) {
         case 'github':
             return handleKiroSocialAuth('Github', currentConfig, options);
         case 'builder-id':
+        case 'iam-sso':
+        case 'identity-center':
             return handleKiroBuilderIDDeviceCode(currentConfig, options);
         default:
             throw new Error(`不支持的认证方式: ${method}`);
@@ -290,9 +292,12 @@ async function handleKiroBuilderIDDeviceCode(currentConfig, options = {}) {
         }
     }
 
-    // 获取 Builder ID Start URL（优先使用前端传入的值，否则使用默认值）
-    const builderIDStartURL = options.builderIDStartURL || KIRO_OAUTH_CONFIG.builderIDStartURL;
-    logger.info(`${KIRO_OAUTH_CONFIG.logPrefix} Using Builder ID Start URL: ${builderIDStartURL}`);
+    const requestedMethod = options.method || options.authMethod || 'builder-id';
+    const authMethod = requestedMethod === 'iam-sso' || requestedMethod === 'identity-center' ? 'iam-sso' : 'builder-id';
+
+    // 获取 Builder ID / IAM Identity Center Start URL（优先使用前端传入的值，否则使用默认值）
+    const builderIDStartURL = options.builderIDStartURL || options.startUrl || KIRO_OAUTH_CONFIG.builderIDStartURL;
+    logger.info(`${KIRO_OAUTH_CONFIG.logPrefix} Using ${authMethod} Start URL: ${builderIDStartURL}`);
 
     // 1. 注册 OIDC 客户端
     const region = options.region || 'us-east-1';
@@ -349,7 +354,7 @@ async function handleKiroBuilderIDDeviceCode(currentConfig, options = {}) {
         5, 
         300, 
         taskId,
-        { ...options, region }
+        { ...options, authMethod, builderIDStartURL, startUrl: builderIDStartURL, region }
     ).catch(error => {
         logger.error(`${KIRO_OAUTH_CONFIG.logPrefix} 轮询失败 [${taskId}]:`, error);
         broadcastEvent('oauth_error', {
@@ -363,13 +368,16 @@ async function handleKiroBuilderIDDeviceCode(currentConfig, options = {}) {
         authUrl: deviceAuth.verificationUriComplete,
         authInfo: {
             provider: 'claude-kiro-oauth',
-            authMethod: 'builder-id',
+            authMethod,
             deviceCode: deviceAuth.deviceCode,
             userCode: deviceAuth.userCode,
             verificationUri: deviceAuth.verificationUri,
             verificationUriComplete: deviceAuth.verificationUriComplete,
             expiresIn: deviceAuth.expiresIn,
             interval: deviceAuth.interval,
+            builderIDStartURL,
+            startUrl: builderIDStartURL,
+            region,
             ...options
         }
     };
@@ -435,10 +443,11 @@ async function pollKiroBuilderIDToken(clientId, clientSecret, deviceCode, interv
                     accessToken: data.accessToken,
                     refreshToken: data.refreshToken,
                     expiresAt: new Date(Date.now() + data.expiresIn * 1000).toISOString(),
-                    authMethod: 'builder-id',
+                    authMethod: options.authMethod === 'iam-sso' ? 'iam-sso' : 'builder-id',
                     clientId,
                     clientSecret,
-                    idcRegion: options.region || 'us-east-1'
+                    idcRegion: options.region || 'us-east-1',
+                    startUrl: options.startUrl || options.builderIDStartURL
                 };
                 
                 await fs.promises.mkdir(path.dirname(credPath), { recursive: true });
@@ -1091,13 +1100,16 @@ export async function importAwsCredentials(credentials, skipDuplicateCheck = fal
         
         logger.info(`${KIRO_OAUTH_CONFIG.logPrefix} Importing AWS credentials...`);
         
+        const inferredAuthMethod = credentials.authMethod ||
+            (credentials.startUrl && credentials.startUrl !== KIRO_OAUTH_CONFIG.builderIDStartURL ? 'iam-sso' : 'builder-id');
+
         // 准备凭据数据 - 四个字段都是必需的
         const credentialsData = {
             clientId: credentials.clientId,
             clientSecret: credentials.clientSecret,
             accessToken: credentials.accessToken,
             refreshToken: credentials.refreshToken,
-            authMethod: credentials.authMethod || 'builder-id',
+            authMethod: inferredAuthMethod,
             // region: credentials.region || KIRO_REFRESH_CONSTANTS.DEFAULT_REGION,
             idcRegion: credentials.idcRegion || KIRO_REFRESH_CONSTANTS.IDC_REGION
         };
@@ -1108,6 +1120,15 @@ export async function importAwsCredentials(credentials, skipDuplicateCheck = fal
         }
         if (credentials.startUrl) {
             credentialsData.startUrl = credentials.startUrl;
+        }
+        if (credentials.region) {
+            credentialsData.region = credentials.region;
+        }
+        if (credentials.authRegion) {
+            credentialsData.authRegion = credentials.authRegion;
+        }
+        if (credentials.apiRegion) {
+            credentialsData.apiRegion = credentials.apiRegion;
         }
         if (credentials.registrationExpiresAt) {
             credentialsData.registrationExpiresAt = credentials.registrationExpiresAt;
@@ -1187,5 +1208,3 @@ export async function importAwsCredentials(credentials, skipDuplicateCheck = fal
         };
     }
 }
-
-
